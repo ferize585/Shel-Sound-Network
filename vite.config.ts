@@ -1,48 +1,51 @@
 import { defineConfig } from 'vite'
 import react from '@vitejs/plugin-react'
-import { nodePolyfills } from 'vite-plugin-node-polyfills'
 
 const isProd = process.env.NODE_ENV === 'production'
 
 export default defineConfig({
   plugins: [
     react(),
-    // Required for Web3/Aptos libs that need Buffer, global, process in browser
-    nodePolyfills({
-      // Only handle module aliasing (e.g. import 'buffer') 
-      // Do not inject globals here as they conflict with src/polyfills.ts and cause Vite 8/Rolldown errors
-      include: ['buffer', 'process', 'util'],
-      globals: {
-        Buffer: false, 
-        global: false,
-        process: false,
-      },
-    }),
   ],
+  resolve: {
+    alias: {
+      // Direct aliasing avoids the problematic 'node-stdlib-browser' proxies that cause Windows Access Denied errors
+      buffer: 'buffer',
+      process: 'process/browser',
+      stream: 'stream-browserify',
+      util: 'util',
+    },
+  },
   optimizeDeps: {
     include: [
       '@telegram-apps/bridge',
       '@web3auth/modal',
-      '@web3auth/openlogin-adapter'
+      '@web3auth/openlogin-adapter',
+      'buffer',
+      'process'
     ],
   },
   build: {
-    // Suppress expected large-chunk warning for Web3 bundles
     chunkSizeWarningLimit: 2000,
     sourcemap: false,
   },
-  // In production: replace console.* with no-ops so the browser console is clean.
-  // In dev: left untouched so console works normally.
-  define: isProd ? {
-    'console.log': '(()=>{})',
-    'console.warn': '(()=>{})',
-    'console.error': '(()=>{})',
-    'console.info': '(()=>{})',
-    'console.debug': '(()=>{})',
-    'console.table': '(()=>{})',
-    'console.group': '(()=>{})',
-    'console.groupEnd': '(()=>{})',
-    'console.time': '(()=>{})',
-    'console.timeEnd': '(()=>{})',
-  } : {},
+  // Global definitions to support legacy libraries
+  define: {
+    'global': 'window',
+    'process.env': '{}',
+    'process.browser': 'true',
+    'process.version': '""',
+    ...(isProd ? {
+      'console.log': '(()=>{})',
+      'console.warn': '(()=>{})',
+      'console.error': '(()=>{})',
+      'console.info': '(()=>{})',
+      'console.debug': '(()=>{})',
+      'console.table': '(()=>{})',
+      'console.group': '(()=>{})',
+      'console.groupEnd': '(()=>{})',
+      'console.time': '(()=>{})',
+      'console.timeEnd': '(()=>{})',
+    } : {}),
+  },
 })
