@@ -1,4 +1,4 @@
-# 🎵 Shel Sound Network
+# 🎵 Shelby Sound Network
 
 **Shel Sound Network** is a modern, decentralized audio streaming and management platform built on the **Aptos Blockchain** and the **Shelby Protocol**. It empowers users to store, manage, and stream their music collection in a truly decentralized manner, leveraging cutting-edge Web3 technologies.
 
@@ -91,4 +91,4 @@ This project is for demonstration and portfolio purposes. All rights reserved.
 
 ---
 
-Developed with 🎵 by the Shel Sound Network Team.
+Developed with 🎵 by the Shelby Sound Network Team.
