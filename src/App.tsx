@@ -4,7 +4,7 @@ import PlayerBar from './components/PlayerBar';
 import TrackList from './components/TrackList';
 import UploadZone from './components/UploadZone';
 import CloudExplorer from './components/CloudExplorer';
-import { getAudioBlobs, normalizeAddress } from './utils/shelbyExplorer';
+import { getAudioBlobs, normalizeAddress, cacheTrackMetadata } from './utils/shelbyExplorer';
 import { parseID3Metadata } from './utils/id3Parser';
 import type { Track, View, Settings } from './types';
 import './index.css';
@@ -47,7 +47,8 @@ function App() {
   const [copied, setCopied] = useState(false);
 
   const [currentPlaylist, setCurrentPlaylist] = useState<Track[]>([]);
-  const [librarySearch, setLibrarySearch] = useState('');;
+  const [librarySearch, setLibrarySearch] = useState('');
+  const [debouncedLibrarySearch, setDebouncedLibrarySearch] = useState('');
 
   // Settings State
   const [settings, setSettings] = useState<Settings>({
@@ -59,16 +60,69 @@ function App() {
     ambientGlow: true
   });
 
-  // Audio Cache (In-memory for session)
-  const audioCache = useRef<Map<string | number, string>>(new Map());
+  // ─── Audio Cache ────────────────────────────────────────────────────────────
+  // Stores { url, size, createdAt, lastAccessed } per track ID.
+  // Eviction is LRU: the least-recently-accessed entry is evicted first.
+  const CACHE_MAX_BYTES = 100 * 1024 * 1024; // 100 MB
+  const audioCache = useRef<Map<string | number, { url: string; size: number; createdAt: number; lastAccessed: number }>>(new Map());
+  const cacheTotalBytes = useRef(0);
+
+  // Preload audio element — plays silently in background for next track URL prefetch
+  const preloadAudioRef = useRef<HTMLAudioElement | null>(null);
+
+  // ─── Concurrency guard ───────────────────────────────────────────────────────
+  // Each loadTrack() call mints a unique Symbol token at entry.
+  // Async checkpoints compare against this ref; if the token has changed (meaning
+  // a newer loadTrack() was called), the stale operation returns immediately
+  // without touching audio state.
+  const activeLoadTokenRef = useRef<symbol | null>(null);
+
+  // Tracks the currently registered onStreamError handler so it can be removed
+  // before the next loadTrack() attaches a new one — prevents stale-closure races.
+  const activeStreamErrorRef = useRef<(() => void) | null>(null);
+
+  /** Add/replace an entry; evict least-recently-used if over 100 MB. */
+  const cacheSet = useCallback((id: string | number, url: string, size: number) => {
+    const existing = audioCache.current.get(id);
+    if (existing) {
+      URL.revokeObjectURL(existing.url);
+      cacheTotalBytes.current -= existing.size;
+    }
+    audioCache.current.set(id, { url, size, createdAt: Date.now(), lastAccessed: Date.now() });
+    cacheTotalBytes.current += size;
+    // Evict LRU (least-recently accessed) entries until under the size limit
+    while (cacheTotalBytes.current > CACHE_MAX_BYTES) {
+      let lruId: string | number | null = null;
+      let lruTime = Infinity;
+      for (const [eid, entry] of audioCache.current) {
+        if (entry.lastAccessed < lruTime) { lruTime = entry.lastAccessed; lruId = eid; }
+      }
+      if (lruId === null) break;
+      const lruEntry = audioCache.current.get(lruId)!;
+      URL.revokeObjectURL(lruEntry.url);
+      cacheTotalBytes.current -= lruEntry.size;
+      audioCache.current.delete(lruId);
+    }
+  }, []);
+
+  /** Remove a single cache entry and revoke its object URL. */
+  const cacheDelete = useCallback((id: string | number) => {
+    const entry = audioCache.current.get(id);
+    if (entry) {
+      URL.revokeObjectURL(entry.url);
+      cacheTotalBytes.current -= entry.size;
+      audioCache.current.delete(id);
+    }
+  }, []);
 
   const toggleSetting = (key: keyof Settings) => {
     setSettings(prev => ({ ...prev, [key]: !prev[key] }));
   };
 
   const clearCache = () => {
-    audioCache.current.forEach(url => URL.revokeObjectURL(url));
+    audioCache.current.forEach(entry => URL.revokeObjectURL(entry.url));
     audioCache.current.clear();
+    cacheTotalBytes.current = 0;
     showToast("Cache cleared successfully");
   };
 
@@ -81,10 +135,8 @@ function App() {
   };
 
 
-  // Persist library to localStorage whenever tracks change
-  useEffect(() => {
-    localStorage.setItem('library', JSON.stringify(tracks));
-  }, [tracks]);
+  // [REMOVED] localStorage.setItem — GraphQL is the source of truth.
+  // Writing here caused stale deleted tracks to reappear after full reload.
 
   // Wallet isolation: reset Library when wallet changes, then load that wallet's tracks
   useEffect(() => {
@@ -94,29 +146,58 @@ function App() {
       try {
         const address = normalizeAddress(account.address.toString());
         const myTracks = await getAudioBlobs(address);
+        cacheTrackMetadata(myTracks); // persist commitment→title for Cloud Explorer
         setTracks(myTracks.filter(t => !deletedIdsRef.current.includes(String(t.id))));
-      } catch (err) {
-        console.error('Load wallet tracks error:', err);
-      }
+      } catch { /* getAudioBlobs already handles errors internally */ }
     };
     setTracks([]);
     load();
   }, [account?.address]); // eslint-disable-line react-hooks/exhaustive-deps
 
-  // Real-time sync: poll every 5 s — ref ensures no stale closure and no interval restart on delete
+  // ─── Visibility-aware polling with AbortController ───────────────────────────
+  // Each sync cycle creates a fresh AbortController so stale in-flight GQL
+  // requests are cancelled when a new cycle fires or the effect tears down.
   useEffect(() => {
     if (!account?.address) return;
+
+    let running = false;
+    let timerId: ReturnType<typeof setTimeout>;
+    let cancelled = false;
+    let syncAbort: AbortController | null = null;
+
     const sync = async () => {
+      if (running || document.hidden || cancelled) return;
+      running = true;
+      syncAbort?.abort(); // cancel any previous in-flight request
+      syncAbort = new AbortController();
       try {
         const address = normalizeAddress(account.address.toString());
-        const incoming = await getAudioBlobs(address);
-        setTracks(incoming.filter(t => !deletedIdsRef.current.includes(String(t.id))));
-      } catch (err) {
-        console.error('Sync wallet tracks error:', err);
+        const incoming = await getAudioBlobs(address, syncAbort.signal);
+        if (!cancelled) {
+          setTracks(incoming.filter(t => !deletedIdsRef.current.includes(String(t.id))));
+        }
+      } finally {
+        running = false;
+        if (!cancelled) timerId = setTimeout(sync, 5000);
       }
     };
-    const interval = setInterval(sync, 5000);
-    return () => clearInterval(interval);
+
+    const onVisibility = () => {
+      if (!document.hidden && !running && !cancelled) {
+        clearTimeout(timerId);
+        sync();
+      }
+    };
+
+    document.addEventListener('visibilitychange', onVisibility);
+    timerId = setTimeout(sync, 5000);
+
+    return () => {
+      cancelled = true;
+      clearTimeout(timerId);
+      syncAbort?.abort();
+      document.removeEventListener('visibilitychange', onVisibility);
+    };
   }, [account?.address]); // eslint-disable-line react-hooks/exhaustive-deps
 
   const audioRef = useRef<HTMLAudioElement>(null);
@@ -127,13 +208,19 @@ function App() {
     try {
       const address = normalizeAddress(account.address.toString());
       const fresh = await getAudioBlobs(address);
+      cacheTrackMetadata(fresh); // persist commitment→title for Cloud Explorer
       setTracks(fresh.filter(t => !deletedIdsRef.current.includes(String(t.id))));
       showToast('Library refreshed', 'success');
-    } catch (err) {
-      console.error('Refresh error:', err);
+    } catch {
       showToast('Refresh failed', 'error');
     }
   }, [account?.address]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  // Debounce library search — 300 ms after last keystroke
+  useEffect(() => {
+    const t = setTimeout(() => setDebouncedLibrarySearch(librarySearch), 300);
+    return () => clearTimeout(t);
+  }, [librarySearch]);
 
 
   const showToast = (msg: string, type: 'success' | 'error' = 'success') => {
@@ -158,7 +245,8 @@ function App() {
 
     // Shelby-level deletion: track.blobName is the plain filename used at upload time
     if (!track.blobName) {
-      console.warn('Missing blobName, removing from UI only:', track);
+      // No on-chain blob — just remove from UI and release any cached objectURL
+      cacheDelete(id);
       setTracks(prev => prev.filter(t => t.id !== id));
       showToast('Track removed from library', 'success');
       return;
@@ -166,10 +254,6 @@ function App() {
 
     try {
       if (!signAndSubmitTransaction) throw new Error('Wallet not connected');
-      console.log('DELETE blobId (blob_commitment):', track.id);
-      console.log('DELETE blobName (for reference): ', track.blobName);
-      console.log('Wallet (signer):', account?.address?.toString());
-      console.log('Track owner:    ', track.owner);
       
       // The Shelby SDK createDeleteBlobPayload explicitly expects the blobName SUFFIX 
       // without the account address prefix (e.g. "foo/bar.txt", not "@0x.../foo/bar.txt")
@@ -181,12 +265,13 @@ function App() {
         blobName: suffixName,
         signer: { signAndSubmitTransaction }
       });
-      console.log('Shelby blob deleted successfully:', suffixName);
-    } catch (err) {
-      console.error('Shelby delete error:', err);
-      showToast('Delete failed on Shelby network', 'error');
+    } catch (err: any) {
+      showToast(err?.message || 'Delete failed on Shelby network', 'error');
       return; // preserve UI state if SDK call failed
     }
+
+    // Release objectURL to free memory before removing from UI
+    cacheDelete(id);
 
     // Tombstone the ID immediately so no fetch can re-add it
     deletedIdsRef.current = [...deletedIdsRef.current, String(id)];
@@ -203,7 +288,66 @@ function App() {
         setTracks(fresh.filter(t => !deletedIdsRef.current.includes(String(t.id))));
       } catch { /* polling will catch it on next cycle */ }
     }, 3000);
-  }, [tracks, signAndSubmitTransaction, deleteBlob, account?.address]); // eslint-disable-line react-hooks/exhaustive-deps
+  }, [tracks, signAndSubmitTransaction, deleteBlob, account?.address, cacheDelete]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  // Returns true when the track has a valid remote URL the browser can stream
+  // directly (http/https). Gateway URLs from Shelby qualify. Blob objectURLs
+  // and empty strings do NOT — they go through the SDK download path.
+  const canStream = (t: Track): boolean => {
+    if (!t.url) return false;
+    try {
+      const { protocol } = new URL(t.url);
+      return protocol === 'http:' || protocol === 'https:';
+    } catch {
+      return false;
+    }
+  };
+
+  // ─── Blob fallback (extracted so both paths can call it) ─────────────────────
+  // Downloads the track via the Shelby SDK, builds a local objectURL, caches it,
+  // then sets audioRef.current.src. Identical to the original blob logic.
+  const loadBlobFallback = async (track: Track) => {
+    const audio = audioRef.current;
+    if (!audio) return;
+    try {
+      const owner = track.owner || account?.address?.toString();
+      if (!owner) throw new Error('Owner address missing for Shelby blob');
+      const suffixName = (track.blobName || '').substring((track.blobName || '').indexOf('/') + 1);
+
+      const blobData = await shelbyClient.download({ account: owner, blobName: suffixName });
+
+      if (blobData && blobData.readable) {
+        const reader = blobData.readable.getReader();
+        const chunks: Uint8Array[] = [];
+        while (true) {
+          const { done, value } = await reader.read();
+          if (done) break;
+          if (value) chunks.push(value);
+        }
+        const blob = new Blob(chunks as any, { type: 'audio/mpeg' });
+        const size = blob.size;
+        const localUrl = URL.createObjectURL(blob);
+
+        cacheSet(track.id, localUrl, size);
+        audio.src = localUrl;
+
+        audio.onloadedmetadata = () => {
+          const dur = audio.duration;
+          if (dur) {
+            setTrackDurations(prev => ({ ...prev, [track.id]: dur }));
+            setTrackSizes(prev => ({ ...prev, [track.id]: size }));
+          }
+        };
+        audio.load();
+      } else {
+        audio.src = track.url; // last resort gateway URL
+      }
+    } catch (err: any) {
+      audio.src = track.url; // last resort gateway URL
+      showToast(err?.message || 'Failed to load track. Check your connection and try again.', 'error');
+      setIsBuffering(false);
+    }
+  };
 
   const loadTrack = useCallback(async (track: Track, autoPlay = true, forcedPlaylist?: Track[]) => {
     let list = forcedPlaylist || (activeView === 'cloud-explorer' ? currentPlaylist : tracks);
@@ -217,6 +361,19 @@ function App() {
     
     if (index < 0) return;
 
+    // ── Concurrency guard: mint a unique token for THIS invocation ───────────────
+    // Any previous async operation that reads activeLoadTokenRef and finds a
+    // different token will abort without touching audio state.
+    const myToken = Symbol();
+    activeLoadTokenRef.current = myToken;
+    const isStale = () => activeLoadTokenRef.current !== myToken;
+
+    // ── Clean up any in-flight onStreamError from a previous loadTrack call ──────
+    if (activeStreamErrorRef.current && audioRef.current) {
+      audioRef.current.removeEventListener('error', activeStreamErrorRef.current);
+      activeStreamErrorRef.current = null;
+    }
+
     // IMMEDIATELY pause the current track so audio doesn't overlap while the new one downloads
     if (audioRef.current) {
       audioRef.current.pause();
@@ -224,16 +381,17 @@ function App() {
     setIsPlaying(false);
     setIsBuffering(true);
     
-    // Check Cache
-    if (audioCache.current.has(track.id)) {
-      track.url = audioCache.current.get(track.id)!;
-    } else if (track.source === 'SHELBY' || track.source === 'shelby') {
-      // If we're loading a Shelby track, we'll cache it automatically 
-      // when the URL is resolved. In this version, we'll store the URL 
-      // if it's already a blob or a persistent link.
-      if (track.url.startsWith('blob:') || track.url.includes('gateway')) {
-        audioCache.current.set(track.id, track.url);
-      }
+    // ─── Cache check ───────────────────────────────────────────────────────────
+    // Use cached objectURL if available (avoids re-downloading from Shelby).
+    const cached = audioCache.current.get(track.id);
+    if (cached) {
+      track.url = cached.url;
+      // Update lastAccessed so LRU eviction keeps frequently-used tracks longer
+      cached.lastAccessed = Date.now();
+    } else if ((track.source === 'SHELBY' || track.source === 'shelby') &&
+               (track.url.startsWith('blob:') || track.url.includes('gateway'))) {
+      // Gateway URL — safe to cache as-is (persistent link, size unknown)
+      cacheSet(track.id, track.url, 0);
     }
     
     setCurrentIndex(index);
@@ -243,66 +401,85 @@ function App() {
 
     if (audioRef.current) {
       if (track.source === 'SHELBY') {
-        try {
-          const owner = track.owner || account?.address?.toString();
-          if (!owner) throw new Error("Owner address missing for Shelby blob");
-          
-          const suffixName = (track.blobName || '').substring((track.blobName || '').indexOf('/') + 1);
-          console.log("SDK Download Params:", owner, suffixName);
-          
-          const blobData = await shelbyClient.download({
-            account: owner,
-            blobName: suffixName
-          });
-          
-          if (blobData && blobData.readable) {
-            // Read full stream manually as requested
-            const reader = blobData.readable.getReader();
-            const chunks: Uint8Array[] = [];
-            while (true) {
-              const { done, value } = await reader.read();
-              if (done) break;
-              if (value) chunks.push(value);
+        // ─── HYBRID STREAMING PATH ────────────────────────────────────────────
+        if (!cached && canStream(track)) {
+          // ── Stream: direct URL → browser handles buffering ──────────────────
+          audioRef.current.src = track.url;
+          audioRef.current.load(); // single load() call for streaming path
+
+          // One-shot error handler scoped strictly to THIS track/token.
+          // Stored in activeStreamErrorRef so the next loadTrack() can remove it
+          // before attaching its own handler — prevents stale-closure races.
+          const onStreamError = async () => {
+            activeStreamErrorRef.current = null;
+            if (isStale()) { setIsBuffering(false); return; } // guard: skip if superseded
+            await loadBlobFallback(track);
+            if (isStale()) { setIsBuffering(false); return; } // guard: after async await
+            if (autoPlay && audioRef.current) {
+              audioRef.current.play().catch(() => setIsBuffering(false));
+            } else {
+              setIsBuffering(false); // guarantee reset when autoPlay=false
             }
+          };
+          activeStreamErrorRef.current = onStreamError;
+          audioRef.current.addEventListener('error', onStreamError, { once: true });
 
-            // Create Blob with explicit audio/mpeg MIME type
-            const blob = new Blob(chunks as any, { type: "audio/mpeg" });
-            const size = blob.size;
-            console.log("Blob size:", size);
-            
-            const localUrl = URL.createObjectURL(blob);
-            audioRef.current.src = localUrl;
+          // For the streaming path, play() is called directly below (no extra load())
 
-            audioRef.current.onloadedmetadata = () => {
-              const dur = audioRef.current?.duration;
-              if (dur) {
-                setTrackDurations(prev => ({ ...prev, [track.id]: dur }));
-                setTrackSizes(prev => ({ ...prev, [track.id]: size }));
-              }
-            };
-
-            audioRef.current.load();
-          } else {
-            console.error("Failed to retrieve blob data from SDK");
-            audioRef.current.src = track.url; // Last resort fallback
-          }
-        } catch (err) {
-          console.error("SDK Playback Error:", err);
-          audioRef.current.src = track.url; // Last resort fallback
-          showToast('Failed to load track. Check your connection and try again.', 'error');
-          setIsBuffering(false);
+        } else {
+          // ── Blob path (cached objectURL OR streaming not available) ──────────
+          await loadBlobFallback(track);
+          if (isStale()) { setIsBuffering(false); return; } // guard: after async download
+          // loadBlobFallback already calls audio.load() internally
         }
       } else {
+        // Non-SHELBY source (local files, etc.) — unchanged
         audioRef.current.src = track.url;
+        audioRef.current.load(); // single explicit load() for non-SHELBY path
       }
 
-      audioRef.current.load();
+      // NOTE: No extra audio.load() here — each branch above handles its own load().
+      // The streaming branch called load() above; blob/non-SHELBY branches also call
+      // load() via loadBlobFallback or explicitly. A second load() would reset the
+      // buffered data and trigger spurious error events.
+
       if (autoPlay) {
         audioRef.current.play().then(() => {
+          if (isStale()) return; // guard: don't update state for an old track
           setIsBuffering(false);
           setIsPlaying(true);
+
+          // ─── Lightweight analytics (local-only) ─────────────────────────────
+          try {
+            const key = 'ssn_play_events';
+            const prev = JSON.parse(sessionStorage.getItem(key) || '[]');
+            prev.push({ title: track.title, artist: track.artist, ts: Date.now() });
+            if (prev.length > 100) prev.splice(0, prev.length - 100);
+            sessionStorage.setItem(key, JSON.stringify(prev));
+          } catch { /* sessionStorage quota exceeded — ignore */ }
+
+          // ─── Next-track preload ──────────────────────────────────────────────
+          setTimeout(() => {
+            if (isStale()) return; // guard: don't preload if user already moved on
+            const nextIdx = (index + 1) % list.length;
+            const nextTrackItem = list[nextIdx];
+            if (
+              nextTrackItem &&
+              nextTrackItem.id !== track.id &&
+              nextTrackItem.url &&
+              !audioCache.current.has(nextTrackItem.id)
+            ) {
+              if (!preloadAudioRef.current) {
+                preloadAudioRef.current = new Audio();
+                preloadAudioRef.current.preload = 'metadata';
+              }
+              preloadAudioRef.current.src = nextTrackItem.url;
+              preloadAudioRef.current.load();
+            }
+          }, 2000);
+
         }).catch(() => {
-          setIsBuffering(false);
+          setIsBuffering(false); // always reset on play() rejection
         });
       } else {
         setIsBuffering(false);
@@ -351,9 +528,18 @@ function App() {
     loadTrack(currentPlaylist[prevIndex], true);
   };
 
+  const MAX_FILE_SIZE = 100 * 1024 * 1024; // 100 MB per file
+
   const handleFilesSelected = async (files: File[]) => {
     if (!connected) {
       showToast("Please connect your wallet first", "error");
+      return;
+    }
+
+    // Validate file sizes before processing
+    const oversized = files.filter(f => f.size > MAX_FILE_SIZE);
+    if (oversized.length > 0) {
+      showToast(`File too large (max 100 MB): ${oversized.map(f => f.name).join(', ')}`, "error");
       return;
     }
 
@@ -388,10 +574,9 @@ function App() {
       setPreparedFiles(newFiles);
       setUploadStatus('idle');
       showToast(`${files.length} file(s) prepared for sync`, "success");
-    } catch (e) {
-      console.error("File Preparation Error:", e);
+    } catch (e: any) {
       setUploadStatus('error');
-      showToast("Failed to read files", "error");
+      showToast(e?.message || "Failed to read files", "error");
     }
   };
 
@@ -409,12 +594,6 @@ function App() {
         ? account.address 
         : (account.address as any).toString();
 
-      console.log("Signer Prep (Direct Click):", {
-        address: addressString,
-        hasSigner: !!signAndSubmitTransaction,
-        network: network?.name
-      });
-
       const blobDataList = preparedFiles.map(f => ({
         blobName: f.name,
         blobData: f.data
@@ -430,25 +609,17 @@ function App() {
           signAndSubmitTransaction 
         }
       });
-      
-      console.log("Shelby Upload Completed");
 
       setPreparedFiles([]);
       setUploadStatus('success');
       showToast("Upload Successful! Syncing library...", "success");
       
       // The indexer usually takes ~1-3 seconds to see the new blob.
-      setTimeout(() => {
-         refreshLibrary();
-      }, 2500);
-
-      setTimeout(() => {
-        setUploadStatus('idle');
-      }, 4000);
-    } catch (e) {
-      console.error("SDK Upload Error:", e);
+      setTimeout(() => { refreshLibrary(); }, 2500);
+      setTimeout(() => { setUploadStatus('idle'); }, 4000);
+    } catch (e: any) {
       setUploadStatus('error');
-      showToast("Shelby upload failed", "error");
+      showToast(e?.message || "Shelby upload failed", "error");
       setTimeout(() => setUploadStatus('idle'), 3000);
     }
   };
@@ -618,26 +789,26 @@ function App() {
                   fontFamily: 'Inter, sans-serif', outline: 'none', boxSizing: 'border-box'
                 }}
               />
-              <div className="track-list-header">
-                <div className="header-num">#</div>
-                <div className="header-title">TITLE</div>
-                <div className="header-size hidden sm:table-cell">SIZE</div>
-                <div className="header-duration hidden sm:table-cell">DURATION</div>
-                <div className="header-actions hidden sm:table-cell text-right">ACTIONS</div>
+              <div className="track-list-header track-grid">
+                <div className="track-num">#</div>
+                <div className="track-info">TITLE</div>
+                <div className="track-size hidden sm:flex">SIZE</div>
+                <div className="track-duration hidden sm:flex">DURATION</div>
+                <div className="track-actions hidden sm:flex">ACTIONS</div>
               </div>
               <TrackList 
                 tracks={tracks.filter(t =>
-                  !librarySearch ||
-                  t.title.toLowerCase().includes(librarySearch.toLowerCase()) ||
-                  t.artist.toLowerCase().includes(librarySearch.toLowerCase())
+                  !debouncedLibrarySearch ||
+                  t.title.toLowerCase().includes(debouncedLibrarySearch.toLowerCase()) ||
+                  t.artist.toLowerCase().includes(debouncedLibrarySearch.toLowerCase())
                 )} 
                 currentIndex={currentPlaylist === tracks ? currentIndex : -1}
                 isPlaying={isPlaying} 
                 onTrackSelect={(i) => {
                   const filtered = tracks.filter(t =>
-                    !librarySearch ||
-                    t.title.toLowerCase().includes(librarySearch.toLowerCase()) ||
-                    t.artist.toLowerCase().includes(librarySearch.toLowerCase())
+                    !debouncedLibrarySearch ||
+                    t.title.toLowerCase().includes(debouncedLibrarySearch.toLowerCase()) ||
+                    t.artist.toLowerCase().includes(debouncedLibrarySearch.toLowerCase())
                   );
                   loadTrack(filtered[i], true);
                 }}
@@ -665,6 +836,7 @@ function App() {
               formatSize={formatSize}
               durations={trackDurations}
               sizes={trackSizes}
+              ownTracks={tracks}
             />
           )}
 

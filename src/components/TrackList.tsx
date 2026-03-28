@@ -13,7 +13,7 @@ interface TrackListProps {
   sizes: Record<string | number, number>;
 }
 
-const TrackList: React.FC<TrackListProps> = ({ tracks, currentIndex, isPlaying, onTrackSelect, onDelete, formatTime, formatSize, durations, sizes }) => {
+const TrackList: React.FC<TrackListProps> = React.memo(({ tracks, currentIndex, isPlaying, onTrackSelect, onDelete, formatTime, formatSize, durations, sizes }) => {
   const [openMenuId, setOpenMenuId] = React.useState<string | number | null>(null);
 
   const truncate = (text: string, max = 40) =>
@@ -61,9 +61,10 @@ const TrackList: React.FC<TrackListProps> = ({ tracks, currentIndex, isPlaying, 
         return (
           <div key={track.id} className="track-row-container">
             <div 
-              className={`track-item w-full items-center ${i === currentIndex ? 'playing' : ''}`}
+              className={`track-item track-grid ${i === currentIndex ? 'playing' : ''}`}
               style={{ animationDelay: `${i * 0.03}s` }}
             >
+              {/* Index / EQ bars — always visible */}
               <div className="track-num" onClick={() => onTrackSelect(i)}>
                 {i === currentIndex && isPlaying ? (
                   <div className="track-play-icon">
@@ -75,16 +76,17 @@ const TrackList: React.FC<TrackListProps> = ({ tracks, currentIndex, isPlaying, 
                   <span className="track-num-text">{i + 1}</span>
                 )}
               </div>
-              
-              <div className="track-info flex-1 min-w-0" onClick={() => onTrackSelect(i)}>
-                <div className="track-name truncate" title={track.title}>{truncate(cleanTitle)}</div>
+
+              {/* Title + mobile-only metadata — always visible */}
+              <div className="track-info" onClick={() => onTrackSelect(i)}>
+                <div className="track-name" title={track.title}>{truncate(cleanTitle)}</div>
                 {/* Mobile ONLY metadata */}
                 <div className="track-meta-mobile sm:hidden truncate">
                   {formatSize(size)} • {duration ? formatTime(duration) : '—:——'}
                 </div>
               </div>
 
-              {/* Mobile Action Trigger (⋮) */}
+              {/* Mobile Action Trigger (⋮) — mobile ONLY, unchanged */}
               <div className="sm:hidden ml-2 mr-3 flex-shrink-0">
                 <button
                   className="mobile-menu-trigger"
@@ -97,24 +99,27 @@ const TrackList: React.FC<TrackListProps> = ({ tracks, currentIndex, isPlaying, 
                 </button>
               </div>
 
-              {/* Desktop ONLY columns */}
-              <div className="track-size hidden sm:table-cell truncate" onClick={() => onTrackSelect(i)}>
+              {/* ── Desktop ONLY columns (hidden on mobile via CSS) ── */}
+              <div className="track-size hidden sm:block" onClick={() => onTrackSelect(i)}>
                 {formatSize(size)}
               </div>
-              <div className="track-duration hidden sm:table-cell truncate" onClick={() => onTrackSelect(i)}>
+              <div className="track-duration hidden sm:block" onClick={() => onTrackSelect(i)}>
                 {duration ? formatTime(duration) : '—:——'}
               </div>
-              
-              {onDelete && (
-                <div className="track-actions hidden sm:table-cell text-right">
-                  <button 
-                    className="delete-btn" 
+
+              {/* Actions — ALWAYS rendered as 5th grid child to keep column count consistent.
+                  The delete button inside is conditional; the container div is not. */}
+              <div className="track-actions hidden sm:flex">
+                {onDelete && (
+                  <button
+                    className="delete-btn"
                     onClick={(e) => { e.stopPropagation(); onDelete(track.id); }}
                   >
                     DELETE
                   </button>
-                </div>
-              )}
+                )}
+              </div>
+
             </div>
 
             {openMenuId === track.id && (
@@ -134,6 +139,8 @@ const TrackList: React.FC<TrackListProps> = ({ tracks, currentIndex, isPlaying, 
       })}
     </div>
   );
-};
+});
+
+TrackList.displayName = 'TrackList';
 
 export default TrackList;

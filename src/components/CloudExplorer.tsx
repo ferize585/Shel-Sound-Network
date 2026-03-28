@@ -1,4 +1,4 @@
-import React, { useEffect, useState } from 'react';
+import React, { useEffect, useRef, useState } from 'react';
 import TrackList from './TrackList';
 import type { Track } from '../types';
 import { getAllAudioBlobs } from '../utils/shelbyExplorer';
@@ -11,17 +11,25 @@ interface CloudExplorerProps {
   formatSize: (bytes: number | undefined) => string;
   durations: Record<string | number, number>;
   sizes: Record<string | number, number>;
+  ownTracks?: Track[]; // user's Library tracks — merged so they always appear with proper names
 }
 
-const CloudExplorer: React.FC<CloudExplorerProps> = ({ onTrackSelect, currentIndex, isPlaying, formatTime, formatSize, durations, sizes }) => {
+const CloudExplorer: React.FC<CloudExplorerProps> = ({ onTrackSelect, currentIndex, isPlaying, formatTime, formatSize, durations, sizes, ownTracks = [] }) => {
   const [cloudTracks, setCloudTracks] = useState<Track[]>([]);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [searchQuery, setSearchQuery] = useState('');
+  const [debouncedSearch, setDebouncedSearch] = useState('');
 
   // Responsive Pagination
   const [page, setPage] = useState(1);
   const [itemsPerPage, setItemsPerPage] = useState(window.innerWidth <= 640 ? 5 : 15);
+
+  // Debounce search — wait 300 ms after last keystroke before filtering
+  useEffect(() => {
+    const t = setTimeout(() => setDebouncedSearch(searchQuery), 300);
+    return () => clearTimeout(t);
+  }, [searchQuery]);
 
   useEffect(() => {
     const handleResize = () => setItemsPerPage(window.innerWidth <= 640 ? 5 : 15);
@@ -29,17 +37,24 @@ const CloudExplorer: React.FC<CloudExplorerProps> = ({ onTrackSelect, currentInd
     return () => window.removeEventListener('resize', handleResize);
   }, []);
 
+  // AbortController ref — cancels any in-flight fetch when a new one starts
+  const fetchAbortRef = useRef<AbortController | null>(null);
+
   const fetchBlobs = async () => {
+    // Cancel any previous in-flight request before starting a new one
+    fetchAbortRef.current?.abort();
+    const controller = new AbortController();
+    fetchAbortRef.current = controller;
+
     setLoading(true);
     setError(null);
-    
     try {
-      const mappedTracks = await getAllAudioBlobs();
+      const mappedTracks = await getAllAudioBlobs(controller.signal);
       setCloudTracks(mappedTracks);
-      console.log("GLOBAL BLOBS (Explorer):", mappedTracks);
     } catch (err: any) {
-      console.error("Fetch Error:", err);
-      setError("Failed to fetch global cloud tracks");
+      if (err?.name !== 'AbortError') {
+        setError(err?.message ?? 'Failed to fetch global cloud tracks');
+      }
     } finally {
       setLoading(false);
     }
@@ -47,15 +62,25 @@ const CloudExplorer: React.FC<CloudExplorerProps> = ({ onTrackSelect, currentInd
 
   useEffect(() => {
     fetchBlobs();
+    // Cleanup: abort in-flight request if component unmounts
+    return () => { fetchAbortRef.current?.abort(); };
   }, []);
 
-  // Pagination Logic
-  const filteredTracks = searchQuery
-    ? cloudTracks.filter(t =>
-        t.title.toLowerCase().includes(searchQuery.toLowerCase()) ||
-        t.artist.toLowerCase().includes(searchQuery.toLowerCase())
+  // Merge: own tracks first (proper titles guaranteed), then global tracks deduped by id.
+  // Own tracks may not appear in GET_ALL_BLOBS (indexer lag / privacy), so we inject them.
+  const ownIds = new Set(ownTracks.map(t => String(t.id)));
+  const mergedTracks = [
+    ...ownTracks,
+    ...cloudTracks.filter(t => !ownIds.has(String(t.id))),
+  ];
+
+  // Pagination Logic — using debouncedSearch to avoid filtering on every keystroke
+  const filteredTracks = debouncedSearch
+    ? mergedTracks.filter(t =>
+        t.title.toLowerCase().includes(debouncedSearch.toLowerCase()) ||
+        t.artist.toLowerCase().includes(debouncedSearch.toLowerCase())
       )
-    : cloudTracks;
+    : mergedTracks;
   const totalPages = Math.ceil(filteredTracks.length / itemsPerPage) || 1;
   const startIndex = (page - 1) * itemsPerPage;
   const displayedTracks = filteredTracks.slice(startIndex, startIndex + itemsPerPage);
@@ -65,7 +90,7 @@ const CloudExplorer: React.FC<CloudExplorerProps> = ({ onTrackSelect, currentInd
       <div className="view-header" style={{ position: 'relative' }}>
         <div className="view-title">
           Cloud Explorer
-          <span className="track-count-badge">{filteredTracks.length}{searchQuery ? ` / ${cloudTracks.length}` : ''} tracks</span>
+          <span className="track-count-badge">{filteredTracks.length}{searchQuery ? ` / ${mergedTracks.length}` : ''} tracks</span>
         </div>
         <div className="view-subtitle">GLOBAL NETWORK DISCOVERY</div>
         
@@ -97,7 +122,7 @@ const CloudExplorer: React.FC<CloudExplorerProps> = ({ onTrackSelect, currentInd
             {loading ? 'SCANNING...' : 'REFRESH'}
           </button>
         </div>
-        {/* Cloud Explorer Search Bar */}
+        {/* Cloud Explorer Search Bar — input updates searchQuery immediately; filtering is debounced */}
         <input
           type="text"
           value={searchQuery}
@@ -124,26 +149,27 @@ const CloudExplorer: React.FC<CloudExplorerProps> = ({ onTrackSelect, currentInd
         </div>
       )}
 
-      {!loading && !error && cloudTracks.length === 0 && (
+      {!loading && !error && mergedTracks.length === 0 && (
         <div style={{ textAlign: 'center', color: 'var(--text-dim)', margin: '40px 0', fontFamily: '"Space Mono", monospace' }}>
           No audio tracks found on Shelby Network.
         </div>
       )}
 
-      {!loading && !error && cloudTracks.length > 0 && (
+      {!loading && !error && mergedTracks.length > 0 && (
         <>
-          <div className="track-list-header">
-            <div>#</div>
-            <div>TITLE</div>
-            <div>SIZE</div>
-            <div style={{ textAlign: 'right' }}>DURATION</div>
+          <div className="track-list-header track-grid">
+            <div className="track-num">#</div>
+            <div className="track-info">TITLE</div>
+            <div className="track-size hidden sm:flex">SIZE</div>
+            <div className="track-duration hidden sm:flex">DURATION</div>
+            <div className="track-actions hidden sm:flex"></div>
           </div>
 
           <TrackList 
             tracks={displayedTracks}
             currentIndex={currentIndex >= startIndex && currentIndex < startIndex + itemsPerPage ? currentIndex - startIndex : -1}
             isPlaying={isPlaying}
-            onTrackSelect={(localIndex) => onTrackSelect(displayedTracks[localIndex], cloudTracks)}
+            onTrackSelect={(localIndex) => onTrackSelect(displayedTracks[localIndex], filteredTracks)}
             formatTime={formatTime}
             formatSize={formatSize}
             durations={durations}

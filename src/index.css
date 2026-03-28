@@ -447,10 +447,35 @@ body::after {
 }
 
 /* Track List */
+
+/* ─────────────────────────────────────────────────────────────────
+   SHARED GRID TEMPLATE
+   Applied to BOTH .track-list-header AND .track-item so that header
+   columns and row columns are ALWAYS geometrically identical.
+   Uses fluid fr/minmax() instead of fixed px so columns breathe on
+   ultra-wide monitors instead of leaving dead space.
+   ───────────────────────────────────────────────────────────────── */
+
+/* ─────────────────────────────────────────────────────────────────
+   SHARED GRID TEMPLATE — single source of truth
+   Applies to BOTH .track-list-header and .track-item.
+   5 columns: [index | title | size | duration | actions]
+   ───────────────────────────────────────────────────────────────── */
+.track-grid {
+  grid-template-columns:
+    48px                      /* [1] index — fixed, never stretches */
+    minmax(0, 6fr)            /* [2] title — dominant flex, minmax(0) allows proper truncation */
+    minmax(100px, 1.2fr)      /* [3] size */
+    minmax(80px,  1fr)        /* [4] duration */
+    minmax(100px, 1.2fr);     /* [5] actions */
+}
+
+/* ───────────────────────────────────────────────────────────────── */
+
 .track-list-header {
-  display: grid;
-  grid-template-columns: 40px 1fr 160px 80px;
-  padding: 10px 40px;
+  /* Hidden on mobile — activated by the ≥640px media query below */
+  display: none;
+  padding: 10px 24px;
   font-family: 'Space Mono', monospace;
   font-size: 9px;
   letter-spacing: 3px;
@@ -458,21 +483,63 @@ body::after {
   text-transform: uppercase;
   border-bottom: 1px solid rgba(0,198,255,0.08);
   background: rgba(0,198,255,0.015);
+  opacity: 0.7;                /* improve header readability as secondary element */
 }
+
+@media (min-width: 640px) {
+  .track-list-header {
+    display: grid;          /* activates grid */
+    /* grid-template-columns comes from .track-grid */
+  }
+}
+
+@media (min-width: 1024px) {
+  .track-list-header { padding: 10px 40px; }
+}
+
+/* Scoped ONLY to header — does NOT affect row cells.
+   Adds breathing room between SIZE and DURATION labels. */
+.track-list-header .track-size {
+  padding-right: 16px;
+  min-width: 80px;
+}
+
+.track-list-header .track-duration {
+  padding-left: 16px;
+  min-width: 80px;
+}
+
 
 .track-list { padding: 8px 0 120px; }
 
+/* ── Mobile: flex column (stacked, unchanged) ─────────────────────────────── */
 .track-item {
-  display: grid;
-  grid-template-columns: 40px 1fr 160px 80px;
+  display: flex;
+  flex-wrap: wrap;
   align-items: center;
-  padding: 0 40px;
-  height: 56px;
+  padding: 0 16px;
+  min-height: 56px;
   cursor: pointer;
   transition: background 0.2s ease, box-shadow 0.2s ease, transform 0.15s ease;
   position: relative;
   border-bottom: 1px solid rgba(0,198,255,0.03);
   animation: trackSlideIn 0.35s cubic-bezier(0.4,0,0.2,1) both;
+}
+
+/* ── Tablet (≥640px): switch to CSS Grid using shared .track-grid template ──── */
+@media (min-width: 640px) {
+  .track-item {
+    display: grid;            /* layout mode; columns from .track-grid */
+    align-items: center;
+    padding: 0 24px;
+    height: 56px;
+    flex-wrap: unset;
+  }
+}
+
+/* ── Desktop (≥1024px): wider padding only, columns handled by .track-grid ─── */
+@media (min-width: 1024px) {
+  .track-item { padding: 0 40px; }
 }
 
 @keyframes trackSlideIn {
@@ -506,6 +573,8 @@ body::after {
   font-size: 11px;
   color: var(--text-muted);
   text-align: center;
+  flex-shrink: 0;
+  width: 40px;
 }
 
 .track-item.playing .track-num {
@@ -515,7 +584,8 @@ body::after {
   background-clip: text;
 }
 
-.track-info { min-width: 0; padding-right: 16px; }
+/* track-info: grows to fill remaining space on mobile, grid cell on desktop */
+.track-info { min-width: 0; padding-right: 12px; flex: 1; }
 
 .track-name {
   font-size: 13px;
@@ -552,11 +622,59 @@ body::after {
   text-overflow: ellipsis;
 }
 
+/* Right-aligned columns: identical flex model for pixel-perfect alignment.
+   Applied to BOTH header cells (.track-size etc.) and row cells. */
+.track-size {
+  font-family: 'Space Mono', monospace;
+  font-size: 11px;
+  color: var(--text-muted);
+  display: flex;
+  justify-content: flex-end;
+  align-items: center;
+  text-align: right;
+  white-space: nowrap;
+  overflow: hidden;
+}
+
 .track-duration {
   font-family: 'Space Mono', monospace;
   font-size: 11px;
   color: var(--text-muted);
+  display: flex;
+  justify-content: flex-end;
+  align-items: center;
   text-align: right;
+  white-space: nowrap;
+  overflow: hidden;
+}
+
+.track-actions {
+  display: flex;
+  justify-content: flex-end;
+  align-items: center;
+  white-space: nowrap;
+  overflow: hidden;
+}
+
+.delete-btn {
+  font-family: 'Space Mono', monospace;
+  font-size: 9px;
+  letter-spacing: 1.5px;
+  padding: 4px 10px;
+  background: transparent;
+  border: 1px solid rgba(255,60,60,0.25);
+  color: rgba(255,80,80,0.5);
+  border-radius: 4px;
+  cursor: pointer;
+  transition: all 0.2s ease;
+  text-transform: uppercase;
+}
+
+.delete-btn:hover {
+  background: rgba(255,60,60,0.12);
+  border-color: rgba(255,80,80,0.6);
+  color: rgba(255,100,100,0.9);
+  box-shadow: 0 0 10px rgba(255,60,60,0.2);
 }
 
 .track-play-icon {
@@ -1631,9 +1749,7 @@ body.drag-active .upload-zone {
     gap: 8px;
   }
 
-  .app {
-    /* Always column now, handled globally */
-  }
+
 
   .content-area {
     flex-direction: column;
@@ -1865,66 +1981,11 @@ body.drag-active .upload-zone {
   min-width: 45px;
 }
 
-.track-list-header, .track-item {
-  display: grid;
-  grid-template-columns: 40px 1fr 100px 80px;
-  padding: 12px 1.5rem;
-  gap: 16px;
-  align-items: center;
-}
 
-.track-list {
-  max-width: 1200px;
-  margin: 0 auto;
-  padding: 0 12px;
-}
+/* NOTE: grid layout for .track-list-header and .track-item is defined
+   by .track-grid at the top of this section. No grid overrides here. */
 
-@media (min-width: 640px) { .track-list { padding: 0 24px; } }
 
-.track-list-header {
-  display: none; 
-  border-bottom: 1px solid rgba(0, 198, 255, 0.08); /* Finer border */
-  color: var(--text-muted);
-  font-size: 10px;
-  letter-spacing: 1px;
-  font-weight: 600;
-  text-transform: uppercase;
-}
-
-@media (min-width: 640px) {
-  .track-list-header {
-    display: grid;
-    grid-template-columns: 40px 1fr 100px 80px 100px;
-    padding: 16px 1.5rem; /* Larger padding */
-    gap: 16px;
-    align-items: center;
-  }
-}
-
-.track-item {
-  display: flex;
-  flex-direction: row;
-  align-items: center;
-  padding: 12px 1rem;
-  gap: 12px;
-  border-radius: 12px;
-  cursor: default; /* changed from pointer */
-  transition: all 0.2s cubic-bezier(0.4, 0, 0.2, 1);
-  border: 1px solid transparent;
-  margin-bottom: 4px;
-  border-bottom: 1px solid rgba(0, 198, 255, 0.05);
-}
-
-@media (min-width: 640px) {
-  .track-item {
-    display: grid;
-    grid-template-columns: 40px 1fr 100px 80px 100px;
-    padding: 14px 1.5rem;
-    gap: 16px;
-    align-items: center;
-    cursor: pointer;
-  }
-}
 
 .track-num {
   font-family: 'Space Mono', monospace;

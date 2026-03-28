@@ -197,6 +197,27 @@ const PlayerBar: React.FC<PlayerBarProps> = ({
     };
   }, [isPlaying, audioRef, settings]);
 
+  // ─── AudioContext cleanup on unmount ─────────────────────────────────────────
+  // Disconnect all Web Audio nodes and close the AudioContext when the
+  // PlayerBar unmounts. This prevents memory leaks and browser warnings
+  // about unclosed AudioContexts.
+  useEffect(() => {
+    return () => {
+      try {
+        sourceNodeRef.current?.disconnect();
+        analyserRef.current?.disconnect();
+        gainNodeRef.current?.disconnect();
+        if (audioCtxRef.current && audioCtxRef.current.state !== 'closed') {
+          audioCtxRef.current.close();
+        }
+        sourceNodeRef.current = null;
+        analyserRef.current = null;
+        gainNodeRef.current = null;
+        audioCtxRef.current = null;
+      } catch { /* ignore errors during teardown */ }
+    };
+  }, []);
+
   // Crossfade / Volume ramp
   useEffect(() => {
     if (!gainNodeRef.current || !settings.crossfade) return;

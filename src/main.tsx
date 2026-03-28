@@ -12,8 +12,6 @@ import { ShelbyClient } from '@shelby-protocol/sdk/browser';
 const queryClient = new QueryClient();
 const apiKey = import.meta.env.VITE_SHELBY_API_KEY_TESTNET;
 
-console.log("Shelby API Key:", apiKey);
-
 // Wrapper to satisfy the requirement of ShelbyProvider with apiKey prop
 const ShelbyProvider = ({ children, apiKey }: { children: React.ReactNode; apiKey?: string }) => {
   // @ts-ignore - The Shelby SDK expects a specific string or enum that may conflict with the upgraded Aptos SDK types
