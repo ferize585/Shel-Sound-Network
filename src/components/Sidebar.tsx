@@ -65,10 +65,24 @@ const Sidebar: React.FC<SidebarProps> = ({
 
     try {
       if (import.meta.env.DEV) {
-        console.log("Google keyless connect triggered");
+        console.log("Google keyless connect triggered, checking available wallets...");
+        console.log("Available wallets:", wallets?.map(w => w.name));
       }
+      
+      const googleWallet = wallets?.find(w => 
+        w.name.toLowerCase().includes("petra web") || 
+        w.name.toLowerCase().includes("aptos connect") ||
+        w.name.toLowerCase().includes("google")
+      );
+
+      if (!googleWallet) {
+        if (import.meta.env.DEV) console.error("Google/Petra Web wallet not found in adapter.");
+        alert("Google wallet option not found. Please try again or use Petra extension.");
+        return;
+      }
+
       await new Promise(r => setTimeout(r, 100));
-      await connect("AptosConnect" as any);
+      await connect(googleWallet.name as any);
 
       setTimeout(() => {
         if (!connectedRef.current) {
