@@ -24,6 +24,7 @@ const Sidebar: React.FC<SidebarProps> = ({
   const [addressCopied, setAddressCopied] = useState(false);
   const dropdownRef = useRef<HTMLDivElement>(null);
   const connectedRef = useRef(connected);
+  const lastConnectRef = useRef<number>(0);
 
   // Keep ref in sync for the setTimeout check
   useEffect(() => {
@@ -39,6 +40,9 @@ const Sidebar: React.FC<SidebarProps> = ({
   const petraWallet = wallets?.find(w => w.name === 'Petra');
 
   const handleConnect = async () => {
+    if (Date.now() - lastConnectRef.current < 3000) return;
+    lastConnectRef.current = Date.now();
+
     if (petraWallet) {
       try {
         await new Promise(r => setTimeout(r, 100));
@@ -46,7 +50,7 @@ const Sidebar: React.FC<SidebarProps> = ({
         
         setTimeout(() => {
           if (!connectedRef.current) {
-            alert("If wallet popup is not visible, please check a new tab or disable popup blocker.");
+            alert("If wallet popup is not visible, please check a new tab or try again in a few seconds.");
           }
         }, 1500);
       } catch (err: any) {
@@ -56,6 +60,9 @@ const Sidebar: React.FC<SidebarProps> = ({
   };
 
   const handleGoogleConnect = async () => {
+    if (Date.now() - lastConnectRef.current < 3000) return;
+    lastConnectRef.current = Date.now();
+
     try {
       if (import.meta.env.DEV) {
         console.log("Google keyless connect triggered");
@@ -65,7 +72,7 @@ const Sidebar: React.FC<SidebarProps> = ({
 
       setTimeout(() => {
         if (!connectedRef.current) {
-          alert("If wallet popup is not visible, please check a new tab or disable popup blocker.");
+          alert("If wallet popup is not visible, please check a new tab or try again in a few seconds.");
         }
       }, 1500);
     } catch (err: any) {
