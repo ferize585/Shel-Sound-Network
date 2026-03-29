@@ -40,10 +40,12 @@ const Sidebar: React.FC<SidebarProps> = ({
 
   const handleGoogleConnect = async () => {
     try {
-      // "Continue with Google" is the default name for Aptos Connect
+      if (import.meta.env.DEV) {
+        console.log("Google keyless connect triggered");
+      }
       await connect("Continue with Google" as any);
-    } catch (err) {
-      if (import.meta.env.DEV) console.error("Google Connect failed:", err);
+    } catch (err: any) {
+      if (import.meta.env.DEV) console.error("Google Connect failed:", err?.message || err);
     }
   };
 

@@ -1,15 +1,12 @@
 import { defineConfig } from 'vite'
 import react from '@vitejs/plugin-react'
 
-const isProd = process.env.NODE_ENV === 'production'
-
 export default defineConfig({
   plugins: [
     react(),
   ],
   resolve: {
     alias: {
-      // Direct aliasing avoids the problematic 'node-stdlib-browser' proxies that cause Windows Access Denied errors
       buffer: 'buffer',
       process: 'process/browser',
       stream: 'stream-browserify',
@@ -27,25 +24,11 @@ export default defineConfig({
   },
   build: {
     chunkSizeWarningLimit: 2000,
-    sourcemap: false,
+    sourcemap: true, // Enable sourcemaps for production debugging
   },
-  // Global definitions to support legacy libraries
   define: {
-    'global': 'window',
-    'process.env': '{}',
-    'process.browser': 'true',
-    'process.version': '""',
-    ...(isProd ? {
-      'console.log': '(()=>{})',
-      'console.warn': '(()=>{})',
-      'console.error': '(()=>{})',
-      'console.info': '(()=>{})',
-      'console.debug': '(()=>{})',
-      'console.table': '(()=>{})',
-      'console.group': '(()=>{})',
-      'console.groupEnd': '(()=>{})',
-      'console.time': '(()=>{})',
-      'console.timeEnd': '(()=>{})',
-    } : {}),
+    // Better global/process shims for production
+    'global': 'globalThis',
+    'process.env.NODE_ENV': JSON.stringify(process.env.NODE_ENV || 'development'),
   },
 })

@@ -10,6 +10,7 @@
     "preview": "vite preview"
   },
   "dependencies": {
+    "@aptos-connect/wallet-adapter-plugin": "^3.0.4",
     "@aptos-labs/ts-sdk": "^6.3.1",
     "@aptos-labs/wallet-adapter-react": "^3.7.3",
     "@react-oauth/google": "^0.13.4",

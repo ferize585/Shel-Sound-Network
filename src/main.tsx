@@ -3,7 +3,8 @@ import React from 'react'
 import ReactDOM from 'react-dom/client'
 import App from './App.tsx'
 import './index.css'
-import { AptosWalletAdapterProvider } from '@aptos-labs/wallet-adapter-react';
+import { AptosWalletAdapterProvider } from "@aptos-labs/wallet-adapter-react";
+import { PetraWallet } from "petra-plugin-wallet-adapter";
 import { Network } from "@aptos-labs/ts-sdk";
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
 import { ShelbyClientProvider } from '@shelby-protocol/react';
@@ -19,13 +20,18 @@ const ShelbyProvider = ({ children, apiKey }: { children: React.ReactNode; apiKe
   return <ShelbyClientProvider client={client}>{children}</ShelbyClientProvider>;
 };
 
+const wallets = [
+  new PetraWallet() as any
+];
+
 ReactDOM.createRoot(document.getElementById('root')!).render(
   <React.StrictMode>
     <AptosWalletAdapterProvider 
+      plugins={wallets}
       autoConnect={true}
       dappConfig={{ 
         network: Network.TESTNET,
-        aptosConnect: {}
+        aptosConnect: { dappId: "shelby-audio-player" }
       }}
     >
       <QueryClientProvider client={queryClient}>
