@@ -25,8 +25,8 @@ const Sidebar: React.FC<SidebarProps> = ({
   const dropdownRef = useRef<HTMLDivElement>(null);
 
   useEffect(() => {
-    if (wallets) {
-      console.log("Aptos Wallets Available:", wallets.map(w => w.name));
+    if (wallets && wallets.length > 0) {
+      if (import.meta.env.DEV) console.log("Aptos Wallets Available:", wallets.map(w => w.name));
     }
   }, [wallets]);
 
@@ -43,7 +43,7 @@ const Sidebar: React.FC<SidebarProps> = ({
       // "Continue with Google" is the default name for Aptos Connect
       await connect("Continue with Google" as any);
     } catch (err) {
-      console.error("Google Connect failed:", err);
+      if (import.meta.env.DEV) console.error("Google Connect failed:", err);
     }
   };
 

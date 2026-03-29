@@ -7,13 +7,14 @@ interface TrackListProps {
   isPlaying: boolean;
   onTrackSelect: (index: number) => void;
   onDelete?: (id: string | number) => void;
+  onToggleVisibility?: (track: Track) => void;
   formatTime: (sec: number | undefined) => string;
   formatSize: (bytes: number | undefined) => string;
   durations: Record<string | number, number>;
   sizes: Record<string | number, number>;
 }
 
-const TrackList: React.FC<TrackListProps> = React.memo(({ tracks, currentIndex, isPlaying, onTrackSelect, onDelete, formatTime, formatSize, durations, sizes }) => {
+const TrackList: React.FC<TrackListProps> = React.memo(({ tracks, currentIndex, isPlaying, onTrackSelect, onDelete, onToggleVisibility, formatTime, formatSize, durations, sizes }) => {
   const [openMenuId, setOpenMenuId] = React.useState<string | number | null>(null);
 
   const truncate = (text: string, max = 40) =>
@@ -57,6 +58,7 @@ const TrackList: React.FC<TrackListProps> = React.memo(({ tracks, currentIndex, 
         const { cleanTitle } = parseTrack(track.title);
         const duration = durations[track.id] || track.duration;
         const size = sizes[track.id] || track.size;
+        const isPublic = track.is_public === true || track.is_public === 'true' as any;
 
         return (
           <div key={track.id} className="track-row-container">
@@ -110,23 +112,80 @@ const TrackList: React.FC<TrackListProps> = React.memo(({ tracks, currentIndex, 
               {/* Actions — ALWAYS rendered as 5th grid child to keep column count consistent.
                   The delete button inside is conditional; the container div is not. */}
               <div className="track-actions hidden sm:flex">
-                {onDelete && (
-                  <button
-                    className="delete-btn"
-                    onClick={(e) => { e.stopPropagation(); onDelete(track.id); }}
-                  >
-                    DELETE
-                  </button>
-                )}
+                <div className="track-opts-menu">
+                  {onToggleVisibility && (
+                    <div className="opt-item" style={{display: 'flex', alignItems: 'center'}}>
+                      <label className="toggle-switch" onClick={(e) => e.stopPropagation()}>
+                        <input
+                          type="checkbox"
+                          checked={isPublic}
+                          onChange={(e) => {
+                            e.stopPropagation();
+                            onToggleVisibility(track);
+                          }}
+                        />
+                        <span className="slider"></span>
+                      </label>
+                      <span className="toggle-label" style={{ marginLeft: '10px' }}>
+                        {isPublic ? 'Public' : 'Private'}
+                      </span>
+                    </div>
+                  )}
+                  {onDelete && (
+                    <button 
+                      className="opt-item text-red" 
+                      onClick={(e) => { e.stopPropagation(); setOpenMenuId(null); onDelete(track.id); }}
+                    >
+                      <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><polyline points="3 6 5 6 21 6"></polyline><path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"></path></svg>
+                      Delete Track
+                    </button>
+                  )}
+                </div>
               </div>
 
             </div>
 
             {openMenuId === track.id && (
-              <div className="mobile-quick-actions sm:hidden">
+              <div 
+                className="mobile-quick-actions sm:hidden"
+                style={{
+                  display: 'flex',
+                  alignItems: 'center',
+                  justifyContent: 'space-between',
+                  gap: '10px',
+                  flexWrap: 'nowrap'
+                }}
+              >
+                {onToggleVisibility && (
+                  <div 
+                    className="mq-btn" 
+                    style={{
+                      display: 'flex', 
+                      alignItems: 'center', 
+                      justifyContent: 'center',
+                      flex: 1
+                    }}
+                  >
+                    <label className="toggle-switch" onClick={(e) => e.stopPropagation()}>
+                      <input
+                        type="checkbox"
+                        checked={isPublic}
+                        onChange={(e) => {
+                          e.stopPropagation();
+                          onToggleVisibility(track);
+                        }}
+                      />
+                      <span className="slider"></span>
+                    </label>
+                    <span className="toggle-label" style={{ marginLeft: '10px', fontSize: '12px' }}>
+                      {isPublic ? 'PUBLIC' : 'PRIVATE'}
+                    </span>
+                  </div>
+                )}
                 {onDelete && (
                   <button 
-                    className="mq-btn mq-delete full-width"
+                    className="mq-btn mq-delete"
+                    style={{ flex: 1, textAlign: 'center' }}
                     onClick={() => { onDelete(track.id); setOpenMenuId(null); }}
                   >
                     DELETE TRACK

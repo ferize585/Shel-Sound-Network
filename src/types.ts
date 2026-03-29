@@ -10,6 +10,7 @@ export interface Track {
   owner?: string;
   blobName?: string;
   size?: number;
+  is_public?: boolean;
 }
 
 export type View = 'library' | 'upload' | 'settings' | 'cloud-explorer';
