@@ -23,6 +23,12 @@ const Sidebar: React.FC<SidebarProps> = ({
   const [showDropdown, setShowDropdown] = useState(false);
   const [addressCopied, setAddressCopied] = useState(false);
   const dropdownRef = useRef<HTMLDivElement>(null);
+  const connectedRef = useRef(connected);
+
+  // Keep ref in sync for the setTimeout check
+  useEffect(() => {
+    connectedRef.current = connected;
+  }, [connected]);
 
   useEffect(() => {
     if (wallets && wallets.length > 0) {
@@ -32,9 +38,20 @@ const Sidebar: React.FC<SidebarProps> = ({
 
   const petraWallet = wallets?.find(w => w.name === 'Petra');
 
-  const handleConnect = () => {
+  const handleConnect = async () => {
     if (petraWallet) {
-      connect(petraWallet.name);
+      try {
+        await new Promise(r => setTimeout(r, 100));
+        connect(petraWallet.name);
+        
+        setTimeout(() => {
+          if (!connectedRef.current) {
+            alert("If wallet popup is not visible, please check a new tab or disable popup blocker.");
+          }
+        }, 1500);
+      } catch (err: any) {
+        if (import.meta.env.DEV) console.error("Petra Connect failed:", err);
+      }
     }
   };
 
@@ -43,7 +60,14 @@ const Sidebar: React.FC<SidebarProps> = ({
       if (import.meta.env.DEV) {
         console.log("Google keyless connect triggered");
       }
+      await new Promise(r => setTimeout(r, 100));
       await connect("Continue with Google" as any);
+
+      setTimeout(() => {
+        if (!connectedRef.current) {
+          alert("If wallet popup is not visible, please check a new tab or disable popup blocker.");
+        }
+      }, 1500);
     } catch (err: any) {
       if (import.meta.env.DEV) console.error("Google Connect failed:", err?.message || err);
     }
@@ -157,6 +181,15 @@ const Sidebar: React.FC<SidebarProps> = ({
               Continue with Google
             </button>
 
+            <div className="wallet-help-hint" style={{ 
+              fontSize: '10px', 
+              color: 'rgba(122, 158, 192, 0.5)', 
+              textAlign: 'center', 
+              marginTop: '12px',
+              fontStyle: 'italic'
+            }}>
+              Having trouble? Check popup or new tab
+            </div>
           </>
         ) : (
           <div className="wallet-connected-container">
