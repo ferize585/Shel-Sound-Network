@@ -22,4 +22,4 @@ window.process = {
     browser: true,
 } as any;
 
-console.log("Wavefront Polyfills Initialized");
+if (import.meta.env.DEV) console.log("Wavefront Polyfills Initialized");

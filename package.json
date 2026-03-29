@@ -15,6 +15,7 @@
     "@react-oauth/google": "^0.13.4",
     "@shelby-protocol/react": "^1.0.3",
     "@shelby-protocol/sdk": "^0.2.4",
+    "@supabase/supabase-js": "^2.100.1",
     "@tanstack/react-query": "^5.95.2",
     "@telegram-apps/bridge": "^2.11.0",
     "@web3auth/modal": "^10.15.0",

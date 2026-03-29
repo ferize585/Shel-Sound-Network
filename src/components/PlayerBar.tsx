@@ -116,7 +116,7 @@ const PlayerBar: React.FC<PlayerBarProps> = ({
           analyserRef.current.connect(audioCtxRef.current.destination);
         }
       } catch (e) {
-        console.error('AudioContext error:', e);
+        if (import.meta.env.DEV) console.error('AudioContext error:', e);
       }
     };
 

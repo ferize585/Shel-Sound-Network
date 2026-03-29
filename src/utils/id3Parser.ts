@@ -88,7 +88,7 @@ export function parseID3Metadata(buffer: ArrayBuffer): { artist?: string; title?
       }
     }
   } catch (err) {
-    console.warn("ID3 Parsing Error:", err);
+    if (import.meta.env.DEV) console.warn("ID3 Parsing Error:", err);
   }
   
   return { artist, title };

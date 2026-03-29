@@ -11,10 +11,9 @@ interface CloudExplorerProps {
   formatSize: (bytes: number | undefined) => string;
   durations: Record<string | number, number>;
   sizes: Record<string | number, number>;
-  ownTracks?: Track[]; // user's Library tracks — merged so they always appear with proper names
 }
 
-const CloudExplorer: React.FC<CloudExplorerProps> = ({ onTrackSelect, currentIndex, isPlaying, formatTime, formatSize, durations, sizes, ownTracks = [] }) => {
+const CloudExplorer: React.FC<CloudExplorerProps> = ({ onTrackSelect, currentIndex, isPlaying, formatTime, formatSize, durations, sizes }) => {
   const [cloudTracks, setCloudTracks] = useState<Track[]>([]);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -66,21 +65,13 @@ const CloudExplorer: React.FC<CloudExplorerProps> = ({ onTrackSelect, currentInd
     return () => { fetchAbortRef.current?.abort(); };
   }, []);
 
-  // Merge: own tracks first (proper titles guaranteed), then global tracks deduped by id.
-  // Own tracks may not appear in GET_ALL_BLOBS (indexer lag / privacy), so we inject them.
-  const ownIds = new Set(ownTracks.map(t => String(t.id)));
-  const mergedTracks = [
-    ...ownTracks,
-    ...cloudTracks.filter(t => !ownIds.has(String(t.id))),
-  ];
-
   // Pagination Logic — using debouncedSearch to avoid filtering on every keystroke
   const filteredTracks = debouncedSearch
-    ? mergedTracks.filter(t =>
+    ? cloudTracks.filter(t =>
         t.title.toLowerCase().includes(debouncedSearch.toLowerCase()) ||
         t.artist.toLowerCase().includes(debouncedSearch.toLowerCase())
       )
-    : mergedTracks;
+    : cloudTracks;
   const totalPages = Math.ceil(filteredTracks.length / itemsPerPage) || 1;
   const startIndex = (page - 1) * itemsPerPage;
   const displayedTracks = filteredTracks.slice(startIndex, startIndex + itemsPerPage);
@@ -90,7 +81,7 @@ const CloudExplorer: React.FC<CloudExplorerProps> = ({ onTrackSelect, currentInd
       <div className="view-header" style={{ position: 'relative' }}>
         <div className="view-title">
           Cloud Explorer
-          <span className="track-count-badge">{filteredTracks.length}{searchQuery ? ` / ${mergedTracks.length}` : ''} tracks</span>
+          <span className="track-count-badge">{filteredTracks.length}{searchQuery ? ` / ${cloudTracks.length}` : ''} tracks</span>
         </div>
         <div className="view-subtitle">GLOBAL NETWORK DISCOVERY</div>
         
@@ -149,13 +140,13 @@ const CloudExplorer: React.FC<CloudExplorerProps> = ({ onTrackSelect, currentInd
         </div>
       )}
 
-      {!loading && !error && mergedTracks.length === 0 && (
+      {!loading && !error && cloudTracks.length === 0 && (
         <div style={{ textAlign: 'center', color: 'var(--text-dim)', margin: '40px 0', fontFamily: '"Space Mono", monospace' }}>
           No audio tracks found on Shelby Network.
         </div>
       )}
 
-      {!loading && !error && mergedTracks.length > 0 && (
+      {!loading && !error && cloudTracks.length > 0 && (
         <>
           <div className="track-list-header track-grid">
             <div className="track-num">#</div>

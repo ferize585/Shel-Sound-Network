@@ -5,6 +5,7 @@ import TrackList from './components/TrackList';
 import UploadZone from './components/UploadZone';
 import CloudExplorer from './components/CloudExplorer';
 import { getAudioBlobs, normalizeAddress, cacheTrackMetadata } from './utils/shelbyExplorer';
+import { saveMetadata, updateTrackVisibility } from './utils/metadataService';
 import { parseID3Metadata } from './utils/id3Parser';
 import type { Track, View, Settings } from './types';
 import './index.css';
@@ -209,7 +210,9 @@ function App() {
       const address = normalizeAddress(account.address.toString());
       const fresh = await getAudioBlobs(address);
       cacheTrackMetadata(fresh); // persist commitment→title for Cloud Explorer
-      setTracks(fresh.filter(t => !deletedIdsRef.current.includes(String(t.id))));
+      const newTracks = fresh.filter(t => !deletedIdsRef.current.includes(String(t.id)));
+      setTracks(newTracks);
+      if (import.meta.env.DEV) console.log('AFTER REFRESH:', newTracks);
       showToast('Library refreshed', 'success');
     } catch {
       showToast('Refresh failed', 'error');
@@ -341,9 +344,11 @@ function App() {
         audio.load();
       } else {
         audio.src = track.url; // last resort gateway URL
+        audio.load();
       }
     } catch (err: any) {
       audio.src = track.url; // last resort gateway URL
+      audio.load();
       showToast(err?.message || 'Failed to load track. Check your connection and try again.', 'error');
       setIsBuffering(false);
     }
@@ -377,8 +382,13 @@ function App() {
     // IMMEDIATELY pause the current track so audio doesn't overlap while the new one downloads
     if (audioRef.current) {
       audioRef.current.pause();
+      // Clear src to immediately abort any pending network requests or play() promises
+      audioRef.current.removeAttribute('src');
+      audioRef.current.load();
     }
-    setIsPlaying(false);
+    // Note: We do NOT need to call setIsPlaying(false) here manually. 
+    // The native 'pause' event executed above will trigger the handlePause 
+    // listener and sync the state naturally, eliminating UI mismatches.
     setIsBuffering(true);
     
     // ─── Cache check ───────────────────────────────────────────────────────────
@@ -447,7 +457,6 @@ function App() {
         audioRef.current.play().then(() => {
           if (isStale()) return; // guard: don't update state for an old track
           setIsBuffering(false);
-          setIsPlaying(true);
 
           // ─── Lightweight analytics (local-only) ─────────────────────────────
           try {
@@ -478,8 +487,10 @@ function App() {
             }
           }, 2000);
 
-        }).catch(() => {
-          setIsBuffering(false); // always reset on play() rejection
+        }).catch((e) => {
+          if (isStale()) { setIsBuffering(false); return; } // guard
+          // AbortError is thrown natively when a play() promise is interrupted by a new src
+          if (e.name !== 'AbortError') setIsBuffering(false);
         });
       } else {
         setIsBuffering(false);
@@ -493,8 +504,11 @@ function App() {
       loadTrack(list[0], true);
       return;
     }
-    if (audioRef.current) {
-      if (isPlaying) {
+    
+    // Rely exclusively on the native audio element's state, preventing 
+    // desyncs between UI (isPlaying) and the actual media engine.
+    if (audioRef.current && audioRef.current.src) {
+      if (!audioRef.current.paused) {
         audioRef.current.pause();
       } else {
         audioRef.current.play().catch(() => {});
@@ -562,6 +576,16 @@ function App() {
             formattedName = file.name;
           }
 
+          // PHASE 2: Save structured metadata explicitly to local cache immediately
+          try {
+            const existing = JSON.parse(localStorage.getItem('track_metadata') || '{}');
+            existing[formattedName] = { 
+              title: title || formattedName.replace(/\.[^.]+$/, '').trim(),
+              artist: artist || 'Unknown Artist'
+            };
+            localStorage.setItem('track_metadata', JSON.stringify(existing));
+          } catch { /* storage unavailable */ }
+
           return {
             name: formattedName,
             file,
@@ -610,6 +634,34 @@ function App() {
         }
       });
 
+      // FIX ID MISMATCH: Dynamic Indexer Callback Fetch
+      let freshTracks: Track[] = [];
+
+      for (let i = 0; i < 5; i++) {
+        freshTracks = await getAudioBlobs(addressString);
+        if (freshTracks.length > 0) break;
+        await new Promise(r => setTimeout(r, 2000));
+      }
+
+      const latest = freshTracks[0];
+
+      await Promise.all(
+        preparedFiles.map(async (f) => {
+          let title = f.name.replace(/\.[^.]+$/, '').trim();
+          let artist = 'Unknown Artist';
+          const match = title.match(/^(.+?)\s*[-–]\s*(.+)$/);
+          if (match) {
+            artist = match[1].trim();
+            title = match[2].trim();
+          }
+
+          if (latest) {
+            const blobCommitment = latest.id.toString();
+            return saveMetadata(blobCommitment, { title, artist, owner: addressString });
+          }
+        })
+      );
+
       setPreparedFiles([]);
       setUploadStatus('success');
       showToast("Upload Successful! Syncing library...", "success");
@@ -622,6 +674,25 @@ function App() {
       showToast(e?.message || "Shelby upload failed", "error");
       setTimeout(() => setUploadStatus('idle'), 3000);
     }
+  };
+
+  // PHASE 5: Visibility Toggle Handler
+  const handleToggleVisibility = async (track: Track) => {
+    if (import.meta.env.DEV) console.log('TOGGLE CLICK:', track.id, track.is_public);
+
+    // FAST UX FIX: Optimistically update UI instantly while fetch happens in background
+    setTracks(prev =>
+      prev.map(t =>
+        t.id === track.id
+          ? { ...t, is_public: !t.is_public }
+          : t
+      )
+    );
+
+    await updateTrackVisibility(track.id.toString(), !track.is_public);
+    
+    // SAFE: refresh data setelah update (akan menarik status Supabase terbaru)
+    if (refreshLibrary) await refreshLibrary();
   };
 
   useEffect(() => {
@@ -735,91 +806,95 @@ function App() {
         />
 
         <main className="main">
-          {activeView === 'library' && (
-            <div className="view">
-              <div className="view-header">
-                <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
-                  <div>
-                    <div className="view-title">
-                      Library
-                      <span className="track-count-badge">
-                        {tracks.length} track{tracks.length !== 1 ? 's' : ''}
-                      </span>
+          {activeView === 'library' && (() => {
+            const userTracks = tracks.filter((track) => track.owner === account?.address?.toString());
+            return (
+              <div className="view">
+                <div className="view-header">
+                  <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
+                    <div>
+                      <div className="view-title">
+                        Library
+                        <span className="track-count-badge">
+                          {userTracks.length} track{userTracks.length !== 1 ? 's' : ''}
+                        </span>
+                      </div>
+                      <div className="view-subtitle">YOUR MUSIC COLLECTION</div>
                     </div>
-                    <div className="view-subtitle">YOUR MUSIC COLLECTION</div>
+                    <button
+                      onClick={refreshLibrary}
+                      disabled={!account?.address}
+                      style={{
+                        padding: '6px 14px',
+                        background: 'rgba(255,255,255,0.07)',
+                        border: '1px solid rgba(255,255,255,0.12)',
+                        borderRadius: '4px',
+                        color: 'rgba(255,255,255,0.7)',
+                        fontSize: '11px',
+                        fontFamily: '"Space Mono", monospace',
+                        fontWeight: '700',
+                        letterSpacing: '1px',
+                        cursor: account?.address ? 'pointer' : 'not-allowed',
+                        display: 'flex',
+                        alignItems: 'center',
+                        gap: '6px',
+                        transition: 'all 0.2s'
+                      }}
+                    >
+                      <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round">
+                        <path d="M1 4v6h6"/><path d="M23 20v-6h-6"/>
+                        <path d="M20.49 9A9 9 0 0 0 5.64 5.64L1 10m22 4l-4.64 4.36A9 9 0 0 1 3.51 15"/>
+                      </svg>
+                      REFRESH
+                    </button>
                   </div>
-                  <button
-                    onClick={refreshLibrary}
-                    disabled={!account?.address}
-                    style={{
-                      padding: '6px 14px',
-                      background: 'rgba(255,255,255,0.07)',
-                      border: '1px solid rgba(255,255,255,0.12)',
-                      borderRadius: '4px',
-                      color: 'rgba(255,255,255,0.7)',
-                      fontSize: '11px',
-                      fontFamily: '"Space Mono", monospace',
-                      fontWeight: '700',
-                      letterSpacing: '1px',
-                      cursor: account?.address ? 'pointer' : 'not-allowed',
-                      display: 'flex',
-                      alignItems: 'center',
-                      gap: '6px',
-                      transition: 'all 0.2s'
-                    }}
-                  >
-                    <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round">
-                      <path d="M1 4v6h6"/><path d="M23 20v-6h-6"/>
-                      <path d="M20.49 9A9 9 0 0 0 5.64 5.64L1 10m22 4l-4.64 4.36A9 9 0 0 1 3.51 15"/>
-                    </svg>
-                    REFRESH
-                  </button>
                 </div>
-              </div>
-              {/* Library Search Bar */}
-              <input
-                type="text"
-                value={librarySearch}
-                onChange={e => setLibrarySearch(e.target.value)}
-                placeholder="Search title or artist..."
-                style={{
-                  width: '100%', margin: '10px 0 6px', padding: '8px 14px',
-                  background: 'rgba(255,255,255,0.05)', border: '1px solid rgba(255,255,255,0.1)',
-                  borderRadius: '6px', color: 'white', fontSize: '13px',
-                  fontFamily: 'Inter, sans-serif', outline: 'none', boxSizing: 'border-box'
-                }}
-              />
-              <div className="track-list-header track-grid">
-                <div className="track-num">#</div>
-                <div className="track-info">TITLE</div>
-                <div className="track-size hidden sm:flex">SIZE</div>
-                <div className="track-duration hidden sm:flex">DURATION</div>
-                <div className="track-actions hidden sm:flex">ACTIONS</div>
-              </div>
-              <TrackList 
-                tracks={tracks.filter(t =>
-                  !debouncedLibrarySearch ||
-                  t.title.toLowerCase().includes(debouncedLibrarySearch.toLowerCase()) ||
-                  t.artist.toLowerCase().includes(debouncedLibrarySearch.toLowerCase())
-                )} 
-                currentIndex={currentPlaylist === tracks ? currentIndex : -1}
-                isPlaying={isPlaying} 
-                onTrackSelect={(i) => {
-                  const filtered = tracks.filter(t =>
+                {/* Library Search Bar */}
+                <input
+                  type="text"
+                  value={librarySearch}
+                  onChange={e => setLibrarySearch(e.target.value)}
+                  placeholder="Search title or artist..."
+                  style={{
+                    width: '100%', margin: '10px 0 6px', padding: '8px 14px',
+                    background: 'rgba(255,255,255,0.05)', border: '1px solid rgba(255,255,255,0.1)',
+                    borderRadius: '6px', color: 'white', fontSize: '13px',
+                    fontFamily: 'Inter, sans-serif', outline: 'none', boxSizing: 'border-box'
+                  }}
+                />
+                <div className="track-list-header track-grid">
+                  <div className="track-num">#</div>
+                  <div className="track-info">TITLE</div>
+                  <div className="track-size hidden sm:flex">SIZE</div>
+                  <div className="track-duration hidden sm:flex">DURATION</div>
+                  <div className="track-actions hidden sm:flex">ACTIONS</div>
+                </div>
+                <TrackList 
+                  tracks={userTracks.filter(t =>
                     !debouncedLibrarySearch ||
                     t.title.toLowerCase().includes(debouncedLibrarySearch.toLowerCase()) ||
                     t.artist.toLowerCase().includes(debouncedLibrarySearch.toLowerCase())
-                  );
-                  loadTrack(filtered[i], true);
-                }}
-                onDelete={handleDelete}
-                formatTime={formatTime}
-                formatSize={formatSize}
-                durations={trackDurations}
-                sizes={trackSizes}
-              />
-            </div>
-          )}
+                  )} 
+                  currentIndex={currentPlaylist === userTracks ? currentIndex : -1}
+                  isPlaying={isPlaying} 
+                  onTrackSelect={(i) => {
+                    const filtered = userTracks.filter(t =>
+                      !debouncedLibrarySearch ||
+                      t.title.toLowerCase().includes(debouncedLibrarySearch.toLowerCase()) ||
+                      t.artist.toLowerCase().includes(debouncedLibrarySearch.toLowerCase())
+                    );
+                    loadTrack(filtered[i], true);
+                  }}
+                  onToggleVisibility={handleToggleVisibility}
+                  onDelete={handleDelete}
+                  formatTime={formatTime}
+                  formatSize={formatSize}
+                  durations={trackDurations}
+                  sizes={trackSizes}
+                />
+              </div>
+            );
+          })()}
 
           {activeView === 'cloud-explorer' && (
             <CloudExplorer 
@@ -836,7 +911,6 @@ function App() {
               formatSize={formatSize}
               durations={trackDurations}
               sizes={trackSizes}
-              ownTracks={tracks}
             />
           )}
 
