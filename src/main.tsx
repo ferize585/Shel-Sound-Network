@@ -29,7 +29,8 @@ ReactDOM.createRoot(document.getElementById('root')!).render(
         dappConfig={{ 
           network: Network.TESTNET,
           aptosConnect: { 
-            dappName: "Shelby Sound Network"
+            dappName: "Shelby Sound Network",
+            dappId: "shelby-audio-player-v1"
           }
         }}
       >
