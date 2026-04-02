@@ -1,241 +1,331 @@
 import { GraphQLClient, gql } from 'graphql-request';
 import type { Track } from '../types';
-import { getAllMetadata, type TrackMetadata } from './metadataService';
+import { getAllMetadata, getPublicMetadataPaginated, type TrackMetadata } from './metadataService';
+import { normalizeAddress, standardizeID } from './addressUtils';
 
-const GQL_ENDPOINT = 'https://api.testnet.aptoslabs.com/nocode/v1/public/cmlfqs5wt00qrs601zt5s4kfj/v1/graphql';
-const API_KEY = import.meta.env.VITE_SHELBY_API_KEY_TESTNET;
-const AUDIO_REGEX = /\.(mp3|wav|ogg|flac|m4a)$/i;
-const MAX_RETRIES = 3;
+interface NetworkConfig {
+  gqlEndpoint: string;
+  gatewayUrl: string;
+  apiKey: string | undefined;
+}
 
-
-const gqlClient = new GraphQLClient(GQL_ENDPOINT, {
-  headers: { Authorization: `Bearer ${API_KEY}` },
-});
+const TESTNET_CONFIG: NetworkConfig = {
+  // Custom Shelby indexer endpoint with 'blobs' schema support
+  gqlEndpoint: 'https://api.testnet.aptoslabs.com/nocode/v1/public/cmlfqs5wt00qrs601zt5s4kfj/v1/graphql',
+  // Official testnet gateway (portal) - Empty means rely strictly on official SDK
+  gatewayUrl: '', 
+  apiKey: import.meta.env.VITE_SHELBY_API_KEY_TESTNET,
+};
 
 const GET_BLOBS = gql`
-  query GetMyBlobs($owner: String!) {
-    blobs(
-      where: { owner: { _eq: $owner }, is_deleted: { _eq: 0 } }
-      order_by: { created_at: desc }
-    ) {
-      blob_commitment
+  query GetBlobs($owner: String!) {
+    blobs(where: { owner: { _eq: $owner } }) {
       blob_name
+      blob_commitment
       owner
-      size
       created_at
     }
   }
 `;
 
-const GET_ALL_BLOBS = gql`
-  query GetAllBlobs {
-    blobs(
-      where: { is_deleted: { _eq: 0 } }
-      order_by: { created_at: desc }
-      limit: 500
-    ) {
-      blob_commitment
+const GET_BLOB_BY_COMMITMENT = gql`
+  query GetBlobByCommitment($commitment: String!) {
+    blobs(where: { blob_commitment: { _eq: $commitment } }) {
       blob_name
       owner
-      size
-      created_at
     }
   }
 `;
 
-/** Retry wrapper — retries only on network-level errors, up to MAX_RETRIES times. */
-async function withRetry<T>(fn: () => Promise<T>, retries = MAX_RETRIES): Promise<T> {
-  for (let attempt = 1; attempt <= retries; attempt++) {
-    try {
-      return await fn();
-    } catch (err: any) {
-      const isNetwork = err?.message?.includes('fetch') || err?.message?.includes('network') || err?.message?.includes('Failed to fetch');
-      if (!isNetwork || attempt === retries) throw err;
-      // Exponential back-off: 500ms, 1000ms
-      await new Promise(res => setTimeout(res, 500 * attempt));
-    }
-  }
-  throw new Error('Max retries exceeded');
-}
+const AUDIO_REGEX = /\.(mp3|wav|ogg|m4a|flac)$/i;
 
-/** Save commitment→title mapping to localStorage so Cloud Explorer can resolve
- *  proper track names. Call this after every successful Library fetch. */
-export function cacheTrackMetadata(tracks: Track[]): void {
-  try {
-    const existing: Record<string, any> =
-      JSON.parse(localStorage.getItem('track_metadata') || '{}');
-    tracks.forEach(t => { 
-      // TASK 1: Structured Metadata Cache
-      existing[String(t.id)] = { title: t.title, artist: t.artist }; 
-    });
-    localStorage.setItem('track_metadata', JSON.stringify(existing));
-  } catch { /* storage unavailable — silently skip */ }
-}
-
-export const normalizeAddress = (address: string): string => {
-  if (!address) return '';
-  let clean = address.trim().toLowerCase();
-  if (!clean.startsWith('0x')) clean = '0x' + clean;
-  const hex = clean.slice(2);
-  return '0x' + hex.padStart(64, '0');
-};
+// External normalization logic moved to addressUtils.ts
 
 function mapBlobToTrack(blob: any, globalMetadata: Record<string, TrackMetadata> = {}): Track {
+  const gateway = TESTNET_CONFIG.gatewayUrl;
+  
   // Resolve display name from stored metadata (from upload time ID3 parse)
   const metadataMap: Record<string, any> = (() => {
-    try { return JSON.parse(localStorage.getItem('track_metadata') || '{}'); }
-    catch { return {}; }
+    try { return JSON.parse(localStorage.getItem('track_metadata') || '{}'); } catch { return {}; }
   })();
 
-  // TASK 2: PRIORITY ORDER
-  // 1. Global metadata ✅ (from SaaS API)
-  // 2. LocalStorage metadata (fallback for older cache / offline)
-  // 3. blob_name parsing
-  // 4. "Unknown Track"
-  
-  const savedData = globalMetadata[blob.blob_commitment] 
-                 || globalMetadata[blob.blob_name]
-                 || metadataMap[blob.blob_commitment] 
-                 || metadataMap[blob.blob_name];
+  const cached = metadataMap[blob.blob_name];
+  const standardID = standardizeID(blob.blob_commitment);
+  const global = globalMetadata[standardID];
 
-  const rawName = blob.blob_name.split('/').pop() || blob.blob_name;
+  // PRIORITIZE: Supabase (global) > Cache (local) > Filename
+  const title = (global?.title && global.title !== '')
+    ? global.title 
+    : (cached?.title || blob.blob_name.replace(/\.[^.]+$/, '').trim());
 
-  let title = 'Unknown Track';
-  let artist = 'Unknown Artist';
+  const artist = (global?.artist && global.artist !== '')
+    ? global.artist 
+    : (cached?.artist || 'Unknown Artist');
 
-  if (savedData && typeof savedData === 'object' && savedData.title) {
-    // PRIORITY 1: Structured metadata from local-cache mapping
-    title = savedData.title;
-    artist = savedData.artist || 'Unknown Artist';
-  } else if (typeof savedData === 'string') {
-    // BACKWARD COMPATIBILITY: Parse old string-based local-cache
-    const cleanStr = (savedData as string).replace(/\.[^.]+$/, '');
-    const m = cleanStr.match(/^(.+?)\s*[-–]\s*(.+)$/);
-    if (m) {
-      artist = m[1].trim();
-      title = m[2].trim();
-    } else {
-      title = cleanStr;
-    }
-  } else if (AUDIO_REGEX.test(rawName)) {
-    // PRIORITY 2: Parsing fallback directly from string blob_name
-    let cleanName = rawName.replace(/\.[^.]+$/, '').replace(/_+/g, ' ').replace(/\s*-+\s*/g, ' - ').trim();
-    const m = cleanName.match(/^(.+?)\s*[-–]\s*(.+)$/);
-    if (m) {
-      artist = m[1].trim();
-      title = m[2].trim();
-    } else {
-      title = cleanName;
-    }
-  }
-  // PRIORITY 3: "Unknown Track", which was set as the baseline let variable.
+  const urlID = standardID;
 
-
-  // blob_commitment is the content-addressed hash the Shelby gateway routes on.
-  // blob_name is an internal store path and does NOT resolve to streamable audio.
-  const url = blob.blob_commitment
-    ? `https://gateway.shelby.xyz/${blob.blob_commitment}`
-    : '';
-
-  if (import.meta.env.DEV) {
-    console.log('[Track URL]', url);
-  }
-
-  const track: Track = {
-    id: blob.blob_commitment,
+  return {
+    id: standardID,
+    blob_commitment: standardID,
     title,
     artist,
-    url,
-    source: 'SHELBY',
     owner: blob.owner,
+    url: `${gateway}${urlID}`,
+    source: 'SHELBY',
     blobName: blob.blob_name,
-    size: blob.size,
-    duration: 0,
-    is_public: savedData?.is_public === true || savedData?.is_public === 'true' as any,
+    created_at: blob.created_at,
+    is_public: global?.is_public || false,
+    size: global?.size,
+    duration: global?.duration
   };
-
-  if (import.meta.env.DEV) {
-    console.log('TRACK VISIBILITY:', track.id, track.is_public);
-    console.log('FINAL TRACK:', track.id, track.is_public);
-  }
-
-  return track;
 }
 
-/** Fetch audio blobs for a specific wallet address.
- *  Pass an AbortSignal to cancel the in-flight request if a newer one starts. */
-export const getAudioBlobs = async (address: string, signal?: AbortSignal): Promise<Track[]> => {
-  if (!address) return [];
-  try {
-    const normalizedAddress = normalizeAddress(address);
-    const data: any = await withRetry(() =>
-      gqlClient.request(GET_BLOBS, { owner: normalizedAddress }, { signal } as any)
-    );
-    
-    // FETCH CACHE - gracefully fail
-    let globalData: Record<string, TrackMetadata> = {};
-    try { globalData = await getAllMetadata(); } catch { }
+const createGqlClient = () => {
+  return new GraphQLClient(TESTNET_CONFIG.gqlEndpoint, {
+    headers: {
+      'Authorization': TESTNET_CONFIG.apiKey ? `Bearer ${TESTNET_CONFIG.apiKey}` : '',
+    },
+  });
+};
 
-    return ((data.blobs || []) as any[])
-      .filter((b: any) => AUDIO_REGEX.test(b.blob_name || ''))
-      .map(b => mapBlobToTrack(b, globalData));
-  } catch (err: any) {
-    if (err?.name === 'AbortError') return []; // cancelled — silently ignore
-    if (import.meta.env.DEV) console.error('Library Sync Error:', err?.message ?? err);
+export const getAudioBlobs = async (
+  owner: string, 
+  signal?: AbortSignal, 
+  filterByMetadata: boolean = true
+): Promise<Track[]> => {
+  if (!owner) return [];
+  const queryAddress = owner;
+  const client = createGqlClient();
+
+    let globalData: Record<string, TrackMetadata> = {};
+    if (filterByMetadata) {
+      try { globalData = await getAllMetadata(); } catch { }
+    }
+
+    try {
+      const data = await (signal 
+        ? client.request(GET_BLOBS, { owner: queryAddress }, { signal } as any)
+        : client.request(GET_BLOBS, { owner: queryAddress })
+      );
+      
+      const indexerBlobs = (data.blobs || []) as any[];
+      const standardizedOwnedBlobs = indexerBlobs.map(b => standardizeID(b.blob_commitment));
+
+      // 1. Map indexer blobs to tracks, but ONLY if they have metadata in Supabase (Sync source of truth)
+      const tracksFromIndexer = indexerBlobs
+        .filter((b: any) => {
+          const isAudio = AUDIO_REGEX.test(b.blob_name || '');
+          const stdID = standardizeID(b.blob_commitment);
+          const meta = globalData[stdID];
+          const hasMetadata = !!meta;
+          
+          // [SURE-IDENTITY]: Cross-verify with Supabase. 
+          // Even if the Indexer says "I own it", if Supabase hasn't confirmed this address
+          // as the owner, skip it to prevent ghost associations.
+          const isVerifiedOwner = meta && normalizeAddress(meta.owner || '') === normalizeAddress(owner);
+          
+          if (filterByMetadata) return isAudio && hasMetadata && isVerifiedOwner;
+          return isAudio;
+        })
+        .map(b => {
+          const track = mapBlobToTrack(b, globalData);
+          // Force the owner from Supabase for absolute certainty
+          const stdID = standardizeID(b.blob_commitment);
+          const meta = globalData[stdID];
+          if (meta?.owner) track.owner = meta.owner;
+          return track;
+        });
+
+      // 2. HYBRID FALLBACK: Any tracks in Supabase for this user but NOT in indexer yet (latency fix)
+      const normalizedOwner = normalizeAddress(owner);
+      const tracksFromSupabase = Object.entries(globalData)
+        .filter(([commitment, meta]) => {
+          const stdID = standardizeID(commitment);
+          const isUserOwned = normalizeAddress(meta.owner || '') === normalizedOwner;
+          const notInIndexer = !standardizedOwnedBlobs.includes(stdID);
+          return isUserOwned && notInIndexer && (meta.title || meta.artist); // Must have some metadata
+        })
+        .map(([commitment, meta]) => {
+          const stdID = standardizeID(commitment);
+          const urlID = stdID;
+          const gateway = TESTNET_CONFIG.gatewayUrl;
+          return {
+            id: stdID,
+            blob_commitment: stdID,
+            title: meta.title || 'Unknown Title',
+            artist: meta.artist || 'Unknown Artist',
+            owner: meta.owner, // [STRICT]: Never fallback to 'owner' variable if meta.owner is missing
+            url: `${gateway}${urlID}`,
+            source: 'SHELBY' as const,
+            blobName: meta.blob_name || '', 
+            is_public: meta.is_public === true,
+            size: meta.size,
+            duration: meta.duration
+          };
+        })
+        .filter(t => !!t.owner); // [SANITY]: Drop any track with missing owner info
+
+      // 3. MERGE & DEDUPLICATE
+      const combined = [...tracksFromIndexer, ...tracksFromSupabase];
+      
+      return combined.filter((track, index, self) => 
+        index === self.findIndex((t) => standardizeID(String(t.id)) === standardizeID(String(track.id)))
+      );
+    } catch (err: any) {
+      // Indexer fallback remains as is
+      if (err?.message?.includes('validation-failed')) {
+        if (import.meta.env.DEV) console.log(`[Explorer] Testnet indexer failed/mismatch, using Supabase fallback...`);
+        
+        return Object.entries(globalData)
+          .filter(([_, meta]) => {
+            const isOwner = String(meta.owner).toLowerCase() === String(owner).toLowerCase();
+            return isOwner;
+          })
+          .map(([commitment, meta]) => {
+            const standardID = standardizeID(commitment);
+            const urlID = standardID;
+            const gateway = TESTNET_CONFIG.gatewayUrl;
+            return {
+              id: standardID,
+              blob_commitment: standardID,
+              title: meta.title || 'Unknown Title',
+              artist: meta.artist || 'Unknown Artist',
+              owner: meta.owner || owner,
+              url: `${gateway}${urlID}`,
+              source: 'SHELBY' as const,
+              blobName: meta.blob_name || '',
+              is_public: meta.is_public === true,
+              size: meta.size,
+              duration: meta.duration
+            };
+          });
+      }
+      
+      if (import.meta.env.DEV) console.error(`Shelby Testnet fetch failed:`, err);
+      return [];
+    }
+};
+
+/**
+ * Returns all tracks indexed in Supabase for the Testnet network.
+ * [LEGACY]: Fetches everything. Use getPublicAudioBlobsPaginated for scalable UI.
+ */
+export const getAllAudioBlobs = async (): Promise<Track[]> => {
+  const gateway = TESTNET_CONFIG.gatewayUrl;
+  
+  try {
+    let globalData: Record<string, TrackMetadata> = {};
+    try { 
+      globalData = await getAllMetadata(); 
+    } catch (err) {
+      if (import.meta.env.DEV) console.error(`[CloudExplorer] Supabase Testnet fetch failed:`, err);
+    }
+
+    const metadataEntries = Object.entries(globalData) as [string, TrackMetadata][];
+    
+    return metadataEntries
+      .filter(([_, meta]) => meta.is_public === true) // STRICT PRIVACY: Only show public tracks
+      .map(([commitment, meta]) => {
+        const standardID = standardizeID(commitment);
+        const urlID = standardID;
+        return {
+          id: standardID,
+          blob_commitment: standardID,
+          title: meta.title || 'Unknown Title',
+          artist: meta.artist || 'Unknown Artist',
+          owner: meta.owner || '',
+          url: `${gateway}${urlID}`,
+          source: 'SHELBY' as const,
+          blobName: meta.blob_name || '', // CRITICAL: Provide blobName for Cloud play
+          is_public: true,
+          size: meta.size,
+          duration: meta.duration
+        };
+      })
+      .filter((track, index, self) => 
+        // DEDUPLICATION: Ensure no double entries in Cloud Explorer
+        index === self.findIndex((t) => standardizeID(String(t.id)) === standardizeID(String(track.id)))
+      );
+
+  } catch (err) {
+    if (import.meta.env.DEV) console.error(`[CloudExplorer] Public Testnet fetch failed:`, err);
     return [];
   }
 };
 
-/** Fetch all public audio blobs from the global Shelby network.
- *  Pass an AbortSignal to cancel the in-flight request if a newer one starts.
- *
- *  Uses the same AUDIO_REGEX filter as getAudioBlobs (Library):
- *  When uploaded via this dApp, blob_name = original filename (e.g. artist-title.mp3).
- *  This filters out non-audio blobs (images, metadata, random uploads). */
-export const getAllAudioBlobs = async (signal?: AbortSignal): Promise<Track[]> => {
+/**
+ * Fetches public audio blobs for global discovery with Server-Side Pagination.
+ */
+export async function getPublicAudioBlobsPaginated(page: number, limit: number): Promise<{tracks: Track[], total: number}> {
   try {
-    const data: any = await withRetry(() => gqlClient.request(GET_ALL_BLOBS, undefined, { signal } as any));
-    const rawBlobs: any[] = data.blobs || [];
+    const { data: globalData, total } = await getPublicMetadataPaginated(page, limit);
+    const publicTracks: Track[] = [];
+    const gateway = TESTNET_CONFIG.gatewayUrl;
 
-    if (import.meta.env.DEV) {
-      console.log('[CloudExplorer] RAW BLOBS TOTAL:', rawBlobs.length);
-    }
-
-    // CLEAN FILTER (LEVEL 1): Strictly validate blob_name is a non-empty audio string
-    const validBlobs = rawBlobs
-      .filter((b: any) => {
-        if (!b.blob_name || typeof b.blob_name !== 'string') return false;
-        const safeName = b.blob_name.trim();
-        // Must have length and explicitly match AUDIO_REGEX (.mp3, .wav, etc)
-        // This implicitly drops raw hashes and metadata/image blobs
-        return safeName.length > 3 && AUDIO_REGEX.test(safeName);
+    (Object.entries(globalData) as [string, TrackMetadata][]).forEach(([commitment, meta]) => {
+      const stdID = standardizeID(commitment);
+      const urlID = stdID;
+      publicTracks.push({
+        id: stdID,
+        blob_commitment: stdID,
+        title: meta.title || 'Unknown Title',
+        artist: meta.artist || 'Unknown Artist',
+        owner: meta.owner || '',
+        url: `${gateway}${urlID}`,
+        source: 'SHELBY' as const,
+        blobName: meta.blob_name || '',
+        is_public: true,
+        size: meta.size,
+        duration: meta.duration
       });
-
-    // FETCH GLOBAL METADATA - gracefully fail
-    let globalData: Record<string, TrackMetadata> = {};
-    try { globalData = await getAllMetadata(); } catch { }
-
-    const tracks = validBlobs.map(b => mapBlobToTrack(b, globalData));
-
-    // PHASE 4: PUBLIC / PRIVATE FILTER & METADATA MATCHING
-    const publicTracks = tracks.filter((track) => {
-      // Normalize blobName to remove directory paths (e.g. "folder/file.mp3" -> "file.mp3")
-      const normalizedName = (track.blobName || '').split('/').pop() || '';
-      const meta = globalData[track.id] || globalData[normalizedName];
-      
-      // Validation 1: Must exist in global tracking
-      // Validation 2: Must explicitly be marked as public (if undefined -> evaluates to false)
-      return meta && meta.is_public === true;
     });
 
-    if (import.meta.env.DEV) {
-      console.log('[CloudExplorer] STRICT AUDIO TRACKS (global public):', publicTracks.length);
-    }
-
-    return publicTracks;
-  } catch (err: any) {
-    if (err?.name === 'AbortError') return []; // cancelled — silently ignore
-    if (import.meta.env.DEV) console.error('Global Explorer Sync Error:', err?.message ?? err);
-    return [];
+    return { tracks: publicTracks, total };
+  } catch (err) {
+    if (import.meta.env.DEV) console.error("Failed to fetch paginated audio blobs:", err);
+    return { tracks: [], total: 0 };
   }
+}
+
+export const cacheTrackMetadata = (tracks: Track[]) => {
+  try {
+    const existing = JSON.parse(localStorage.getItem('track_metadata') || '{}');
+    tracks.forEach(t => {
+      if (t.blobName && t.id) {
+        existing[t.blobName] = { title: t.title, artist: t.artist };
+      }
+    });
+    localStorage.setItem('track_metadata', JSON.stringify(existing));
+  } catch (err) {
+    if (import.meta.env.DEV) console.error('Metadata caching failed:', err);
+  }
+};
+
+/**
+ * Discovery: Search blockchain (Indexer) for a blob identity if missing from local DB.
+ */
+export const findBlobIdentity = async (commitment: string, expectedOwner?: string): Promise<{ blobName: string, owner: string } | null> => {
+  if (!commitment) return null;
+  const client = createGqlClient();
+  try {
+    const data = await client.request(GET_BLOB_BY_COMMITMENT, { commitment: standardizeID(commitment) });
+    const blobs = (data.blobs || []) as any[];
+    if (blobs.length > 0) {
+      // [Identity Collision Resolver] Jika file yang sama pernah diupload banyak orang, 
+      // ambil versi file yang benar-benar milik row owner Cloud Explorer saat ini, bukan indeks ke-0 buta.
+      if (expectedOwner) {
+        const exactMatch = blobs.find(b => String(b.owner).toLowerCase() === String(expectedOwner).toLowerCase());
+        if (exactMatch) {
+          return { blobName: exactMatch.blob_name, owner: exactMatch.owner };
+        }
+      }
+      return { 
+        blobName: blobs[0].blob_name, 
+        owner: blobs[0].owner 
+      }; // fallback if specific owner not found
+    }
+  } catch (err) {
+    if (import.meta.env.DEV) console.error(`[Discovery] Failed to find identity for ${commitment}:`, err);
+  }
+  return null;
 };

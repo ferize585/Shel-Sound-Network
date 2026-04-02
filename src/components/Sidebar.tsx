@@ -1,6 +1,7 @@
-import React, { useState, useRef, useEffect } from 'react';
+import { useState, useRef, useEffect, useLayoutEffect } from 'react';
 import type { View, Track } from '../types';
-import { useWallet } from '@aptos-labs/wallet-adapter-react';
+import { useWallet, type WalletName } from '@aptos-labs/wallet-adapter-react';
+import gsap from 'gsap';
 
 interface SidebarProps {
   activeView: View;
@@ -19,43 +20,29 @@ const Sidebar: React.FC<SidebarProps> = ({
   isOpen, 
   onClose
 }) => {
-  const { connected, account, connect, disconnect, wallets, network } = useWallet();
+  const { connected, account, connect, disconnect, wallets } = useWallet();
   const [showDropdown, setShowDropdown] = useState(false);
-  const [addressCopied, setAddressCopied] = useState(false);
+  const [connectingWallet, setConnectingWallet] = useState<'petra' | 'google' | null>(null);
   const dropdownRef = useRef<HTMLDivElement>(null);
-  const connectedRef = useRef(connected);
   const lastConnectRef = useRef<number>(0);
-
-  // Keep ref in sync for the setTimeout check
-  useEffect(() => {
-    connectedRef.current = connected;
-  }, [connected]);
-
-  useEffect(() => {
-    if (wallets && wallets.length > 0) {
-      if (import.meta.env.DEV) console.log("Aptos Wallets Available:", wallets.map(w => w.name));
-    }
-  }, [wallets]);
-
-  const petraWallet = wallets?.find(w => w.name === 'Petra');
 
   const handleConnect = async () => {
     if (Date.now() - lastConnectRef.current < 3000) return;
     lastConnectRef.current = Date.now();
 
-    if (petraWallet) {
+    try {
+      setConnectingWallet('petra');
       try {
-        await new Promise(r => setTimeout(r, 100));
-        connect(petraWallet.name);
-        
-        setTimeout(() => {
-          if (!connectedRef.current) {
-            alert("If wallet popup is not visible, please check a new tab or try again in a few seconds.");
-          }
-        }, 1500);
+        // [Official Adapter API - No Bypass!]: Setia kepada dokumen Aptos V3
+        // Modul bypass ditiadakan agar Auto-Discovery secara alamiah menskalakan pop-up ekstensi Chrome dari browser Mises.
+        await connect("Petra" as WalletName<"Petra">);
       } catch (err: any) {
-        if (import.meta.env.DEV) console.error("Petra Connect failed:", err);
+        if (import.meta.env.DEV) console.error("Petra Connect failed:", err?.message || err);
+      } finally {
+        setConnectingWallet(null);
       }
+    } catch (err: any) {
+      if (import.meta.env.DEV) console.error("Petra init failed:", err);
     }
   };
 
@@ -64,11 +51,6 @@ const Sidebar: React.FC<SidebarProps> = ({
     lastConnectRef.current = Date.now();
 
     try {
-      if (import.meta.env.DEV) {
-        console.log("Google keyless connect triggered, checking available wallets...");
-        console.log("Available wallets:", wallets?.map(w => w.name));
-      }
-      
       const googleWallet = wallets?.find(w => 
         w.name.toLowerCase().includes("petra web") || 
         w.name.toLowerCase().includes("aptos connect") ||
@@ -76,21 +58,21 @@ const Sidebar: React.FC<SidebarProps> = ({
       );
 
       if (!googleWallet) {
-        if (import.meta.env.DEV) console.error("Google/Petra Web wallet not found in adapter.");
         alert("Google wallet option not found. Please try again or use Petra extension.");
         return;
       }
 
-      await new Promise(r => setTimeout(r, 100));
-      await connect(googleWallet.name as any);
-
-      setTimeout(() => {
-        if (!connectedRef.current) {
-          alert("If wallet popup is not visible, please check a new tab or try again in a few seconds.");
-        }
-      }, 1500);
+      setConnectingWallet('google');
+      try {
+        // Pemanggilan langsung (Synchronous Interaction) ke provider.
+        await connect(googleWallet.name as any);
+      } catch (err: any) {
+        if (import.meta.env.DEV) console.error("Google Connect failed:", err?.message || err);
+      } finally {
+        setConnectingWallet(null);
+      }
     } catch (err: any) {
-      if (import.meta.env.DEV) console.error("Google Connect failed:", err?.message || err);
+      if (import.meta.env.DEV) console.error("Google init failed:", err);
     }
   };
 
@@ -115,8 +97,48 @@ const Sidebar: React.FC<SidebarProps> = ({
     return () => document.removeEventListener('mousedown', handleClickOutside);
   }, []);
 
+  const sidebarRef = useRef<HTMLElement>(null);
+
+  useLayoutEffect(() => {
+    const ctx = gsap.context(() => {
+      const mm = gsap.matchMedia();
+      
+      // Only animate on mobile
+      mm.add("(max-width: 1023px)", () => {
+        if (isOpen) {
+          gsap.to(sidebarRef.current, { 
+            x: 0, 
+            duration: 0.4, 
+            ease: "power2.out",
+            display: "flex" 
+          });
+        } else {
+          gsap.to(sidebarRef.current, { 
+            x: "-100%", 
+            duration: 0.3, 
+            ease: "power2.in",
+            onComplete: () => {
+              if (sidebarRef.current) sidebarRef.current.style.display = "none";
+            }
+          });
+        }
+      });
+
+      // Reset styles on desktop
+      mm.add("(min-width: 1024px)", () => {
+        gsap.set(sidebarRef.current, { 
+          x: 0, 
+          display: "flex", 
+          clearProps: "all" 
+        });
+      });
+    }, sidebarRef);
+
+    return () => ctx.revert();
+  }, [isOpen]);
+
   return (
-    <aside className={`sidebar ${isOpen ? 'open' : ''}`}>
+    <aside className={`sidebar ${isOpen ? 'open' : ''}`} ref={sidebarRef}>
       <button className="sidebar-close-btn" onClick={onClose}>
         <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
           <path d="M18 6L6 18M6 6l12 12"/>
@@ -181,87 +203,48 @@ const Sidebar: React.FC<SidebarProps> = ({
               <div className="pulse-dot"></div>
               Built on Shelby Network
             </div>
-            <button className="connect-wallet-btn" onClick={handleConnect}>
-              <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
-                <rect x="3" y="11" width="18" height="11" rx="2" ry="2"/>
-                <path d="M7 11V7a5 5 0 0 1 10 0v4"/>
-              </svg>
-              Connect Wallet
+            <button 
+              className={`connect-wallet-btn ${connectingWallet === 'petra' ? 'connecting' : ''}`} 
+              onClick={handleConnect}
+              disabled={!!connectingWallet}
+            >
+              {connectingWallet === 'petra' ? (
+                <>
+                  <div className="btn-spinner"></div>
+                  Connecting...
+                </>
+              ) : (
+                'Connect Wallet'
+              )}
             </button>
 
             <button 
-              className="google-connect-btn" 
+              className={`google-connect-btn ${connectingWallet === 'google' ? 'connecting' : ''}`} 
               onClick={handleGoogleConnect}
+              disabled={!!connectingWallet}
             >
-              <svg width="14" height="14" viewBox="0 0 24 24" fill="currentColor">
-                <path d="M22.56 12.25c0-.78-.07-1.53-.2-2.25H12v4.26h5.92c-.26 1.37-1.04 2.53-2.21 3.31v2.77h3.57c2.08-1.92 3.28-4.74 3.28-8.09z"/>
-                <path d="M12 23c2.97 0 5.46-.98 7.28-2.66l-3.57-2.77c-.98.66-2.23 1.06-3.71 1.06-2.86 0-5.29-1.93-6.16-4.53H2.18v2.84C3.99 20.53 7.7 23 12 23z"/>
-                <path d="M5.84 14.09c-.22-.66-.35-1.36-.35-2.09s.13-1.43.35-2.09V7.07H2.18C1.43 8.55 1 10.22 1 12s.43 3.45 1.18 4.93l3.66-2.84z"/>
-                <path d="M12 5.38c1.62 0 3.06.56 4.21 1.66l3.15-3.15C17.45 2.09 14.97 1 12 1 7.7 1 3.99 3.47 2.18 7.07l3.66 2.84c.87-2.6 3.3-4.53 6.16-4.53z"/>
-              </svg>
-              Continue with Google
+              {connectingWallet === 'google' ? (
+                <>
+                  <div className="btn-spinner"></div>
+                  Connecting...
+                </>
+              ) : (
+                'Continue with Google'
+              )}
             </button>
-
-            <div className="wallet-help-hint" style={{ 
-              fontSize: '10px', 
-              color: 'rgba(122, 158, 192, 0.5)', 
-              textAlign: 'center', 
-              marginTop: '12px',
-              fontStyle: 'italic'
-            }}>
-              Having trouble? Check popup or new tab
-            </div>
           </>
         ) : (
           <div className="wallet-connected-container">
-            <div style={{ display: 'flex', alignItems: 'center', gap: '6px' }}>
-              <button className="wallet-address-btn" onClick={() => setShowDropdown(!showDropdown)}>
-                <div className="status-dot"></div>
-                {shortenedAddress}
-              </button>
-              <button
-                title="Copy full address"
-                onClick={() => {
-                  if (account?.address) {
-                    navigator.clipboard.writeText(account.address.toString());
-                    setAddressCopied(true);
-                    setTimeout(() => setAddressCopied(false), 2000);
-                  }
-                }}
-                style={{
-                  background: 'none', border: 'none', cursor: 'pointer', padding: '4px',
-                  color: addressCopied ? '#00c6ff' : 'rgba(255,255,255,0.45)',
-                  transition: 'color 0.2s', flexShrink: 0
-                }}
-              >
-                {addressCopied ? (
-                  <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round">
-                    <polyline points="20 6 9 17 4 12"/>
-                  </svg>
-                ) : (
-                  <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-                    <rect x="9" y="9" width="13" height="13" rx="2" ry="2"/>
-                    <path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/>
-                  </svg>
-                )}
-              </button>
-            </div>
+            <button className="wallet-address-btn" onClick={() => setShowDropdown(!showDropdown)}>
+              <div className="status-dot"></div>
+              {shortenedAddress}
+            </button>
             
             {showDropdown && (
               <div className="wallet-dropdown">
                 <div className="wallet-dropdown-header">
                   <div className="wallet-dropdown-label">CONNECTED ADDRESS</div>
                   <div className="wallet-dropdown-address">{account?.address.toString()}</div>
-                </div>
-                <div className="wallet-dropdown-info">
-                  <div className="wallet-dropdown-row">
-                    <span>Network</span>
-                    <span className="network-tag">{network?.name || 'Unknown'}</span>
-                  </div>
-                  <div className="wallet-dropdown-row">
-                    <span>Status</span>
-                    <span className="status-tag">Online</span>
-                  </div>
                 </div>
                 <button className="wallet-disconnect-btn" onClick={() => disconnect()}>
                   Disconnect

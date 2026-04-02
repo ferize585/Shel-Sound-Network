@@ -1,25 +1,18 @@
-declare global {
-  interface Window {
-    Buffer: any;
-    global: Window;
-    process: any;
-  }
+import { Buffer } from 'buffer';
+// @ts-ignore
+import process from 'process';
+
+/**
+ * Polyfills for the browser environment.
+ * These are required by the Shelby SDK and its internal dependencies (like reed-solomon).
+ * By importing this file as the very first line of main.tsx, we ensure Node.js globals 
+ * like 'Buffer' and 'global' are available before any other code is evaluated.
+ */
+
+if (typeof window !== 'undefined') {
+  (window as any).Buffer = Buffer;
+  (window as any).global = window;
+  (window as any).process = process;
 }
 
-import { Buffer } from 'buffer';
-
-// 1. Buffer support
-window.Buffer = Buffer;
-
-// 2. Global support (some libraries expect 'global')
-window.global = window;
-
-// 3. Process support (minimal shim for libraries that check process.env or process.version)
-window.process = {
-    env: { NODE_DEBUG: undefined },
-    version: '',
-    nextTick: (cb: any) => setTimeout(cb, 0),
-    browser: true,
-} as any;
-
-if (import.meta.env.DEV) console.log("Wavefront Polyfills Initialized");
+export {};

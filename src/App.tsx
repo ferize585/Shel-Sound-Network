@@ -1,12 +1,16 @@
-import { useState, useRef, useEffect, useCallback } from 'react';
+import { useState, useRef, useEffect, useCallback, useLayoutEffect, useMemo } from 'react';
+import gsap from 'gsap';
+
+// GSAP matchMedia is core, no extra plugins needed
 import Sidebar from './components/Sidebar';
 import PlayerBar from './components/PlayerBar';
 import TrackList from './components/TrackList';
 import UploadZone from './components/UploadZone';
 import CloudExplorer from './components/CloudExplorer';
-import { getAudioBlobs, normalizeAddress, cacheTrackMetadata } from './utils/shelbyExplorer';
-import { saveMetadata, updateTrackVisibility } from './utils/metadataService';
+import { getAudioBlobs, cacheTrackMetadata, findBlobIdentity } from './utils/shelbyExplorer';
+import { saveMetadata, updateTrackVisibility, deleteMetadata } from './utils/metadataService';
 import { parseID3Metadata } from './utils/id3Parser';
+import { normalizeAddress } from './utils/addressUtils';
 import type { Track, View, Settings } from './types';
 import './index.css';
 
@@ -15,7 +19,6 @@ import { Network } from '@aptos-labs/ts-sdk';
 import { useUploadBlobs, useDeleteBlob, useShelbyClient } from '@shelby-protocol/react';
 
 function App() {
-  // Start empty — GraphQL is the source of truth. localStorage caused stale deleted tracks to reappear.
   const [tracks, setTracks] = useState<Track[]>([]);
   const [currentIndex, setCurrentIndex] = useState(-1);
   const [isPlaying, setIsPlaying] = useState(false);
@@ -31,8 +34,10 @@ function App() {
   const [trackSizes, setTrackSizes] = useState<Record<string | number, number>>({});
   const [toast, setToast] = useState<{ msg: string; type: 'success' | 'error' } | null>(null);
   const [isArtFlashing, setIsArtFlashing] = useState(false);
+  const [isReconnecting, setIsReconnecting] = useState(false);
+  
   const [sidebarOpen, setSidebarOpen] = useState(false);
-  const [preparedFiles, setPreparedFiles] = useState<{name: string, data: Uint8Array}[]>([]);
+  const [preparedFiles, setPreparedFiles] = useState<{name: string, data: Uint8Array, title: string, artist: string, sizeRaw?: number, duration?: number}[]>([]);
   // Ref (not state) so interval callbacks always read the latest deleted IDs without restarting the timer
   const deletedIdsRef = useRef<string[]>([]);
 
@@ -51,6 +56,102 @@ function App() {
   const [librarySearch, setLibrarySearch] = useState('');
   const [debouncedLibrarySearch, setDebouncedLibrarySearch] = useState('');
 
+  const mainRef = useRef<HTMLDivElement>(null);
+  const overlayRef = useRef<HTMLDivElement>(null);
+
+  // Library Pagination State (Moved to Top-Level for React hook safety)
+  const calculateLibLimit = useCallback(() => {
+    if (typeof window === 'undefined') return 15;
+    const width = window.innerWidth;
+    if (width < 768) return 5;
+    if (width < 1024) return 10;
+    return 15;
+  }, []);
+
+  const [libraryPage, setLibraryPage] = useState(1);
+  const [libraryLimit, setLibraryLimit] = useState(calculateLibLimit());
+  const libraryListRef = useRef<HTMLDivElement>(null);
+  const libraryPaginationRef = useRef<HTMLDivElement>(null);
+
+  useEffect(() => {
+    const handleResize = () => {
+      const newLimit = calculateLibLimit();
+      setLibraryLimit(prev => {
+        if (prev !== newLimit) {
+          setLibraryPage(1);
+          return newLimit;
+        }
+        return prev;
+      });
+    };
+    window.addEventListener('resize', handleResize);
+    return () => window.removeEventListener('resize', handleResize);
+  }, [calculateLibLimit]);
+
+  const handleLibraryPageChange = (newPage: number, totalPages: number) => {
+    if (newPage < 1 || newPage > totalPages || newPage === libraryPage) return;
+    
+    // Immediate state update for responsiveness
+    setLibraryPage(newPage);
+
+    // Scroll main content to top
+    if (mainRef.current) {
+      mainRef.current.scrollTo({ top: 0, behavior: 'smooth' });
+    }
+
+    // Secondary animation (non-blocking)
+    const animTargets = [libraryListRef.current, libraryPaginationRef.current].filter(Boolean);
+    if (animTargets.length > 0) {
+      gsap.fromTo(animTargets,
+        { opacity: 0, y: 15, filter: 'blur(8px)' },
+        { opacity: 1, y: 0, filter: 'blur(0px)', duration: 0.5, ease: "power3.out", stagger: 0.05, clearProps: "opacity,transform,filter" }
+      );
+    }
+  };
+
+  useLayoutEffect(() => {
+    const ctx = gsap.context(() => {
+      // Animate Overlay
+      if (sidebarOpen) {
+        gsap.fromTo(overlayRef.current, 
+          { opacity: 0 }, 
+          { opacity: 1, duration: 0.3, ease: "power2.out", display: "block" }
+        );
+      } else {
+        gsap.to(overlayRef.current, 
+          { opacity: 0, duration: 0.3, ease: "power2.in", onComplete: () => {
+            if (overlayRef.current) overlayRef.current.style.display = "none";
+          }}
+        );
+      }
+    }, mainRef);
+    return () => ctx.revert();
+  }, [sidebarOpen]);
+
+  useLayoutEffect(() => {
+    const ctx = gsap.context(() => {
+      const mm = gsap.matchMedia();
+      
+      // Desktop & Tablet View Entry
+      mm.add("(min-width: 768px)", () => {
+        gsap.fromTo(".view", 
+          { opacity: 0, x: 20, filter: "blur(10px)" }, 
+          { opacity: 1, x: 0, filter: "blur(0px)", duration: 0.6, ease: "power2.out", clearProps: "all" }
+        );
+      });
+
+      // Mobile/Smartphone View Entry
+      mm.add("(max-width: 767px)", () => {
+        gsap.fromTo(".view", 
+          { opacity: 0, y: 30, filter: "blur(5px)" }, 
+          { opacity: 1, y: 0, filter: "blur(0px)", duration: 0.5, ease: "power3.out", clearProps: "all" }
+        );
+      });
+    }, mainRef);
+
+    return () => ctx.revert();
+  }, [activeView]);
+
   // Settings State
   const [settings, setSettings] = useState<Settings>({
     crossfade: false,
@@ -60,6 +161,9 @@ function App() {
     visualizer: true,
     ambientGlow: true
   });
+  
+  // Real-time Tracker for UI
+  const [cacheUsageBytes, setCacheUsageBytes] = useState<number>(0);
 
   // ─── Audio Cache ────────────────────────────────────────────────────────────
   // Stores { url, size, createdAt, lastAccessed } per track ID.
@@ -104,6 +208,7 @@ function App() {
       cacheTotalBytes.current -= lruEntry.size;
       audioCache.current.delete(lruId);
     }
+    setCacheUsageBytes(cacheTotalBytes.current);
   }, []);
 
   /** Remove a single cache entry and revoke its object URL. */
@@ -114,6 +219,7 @@ function App() {
       cacheTotalBytes.current -= entry.size;
       audioCache.current.delete(id);
     }
+    setCacheUsageBytes(cacheTotalBytes.current);
   }, []);
 
   const toggleSetting = (key: keyof Settings) => {
@@ -124,6 +230,7 @@ function App() {
     audioCache.current.forEach(entry => URL.revokeObjectURL(entry.url));
     audioCache.current.clear();
     cacheTotalBytes.current = 0;
+    setCacheUsageBytes(0);
     showToast("Cache cleared successfully");
   };
 
@@ -141,14 +248,25 @@ function App() {
 
   // Wallet isolation: reset Library when wallet changes, then load that wallet's tracks
   useEffect(() => {
-    if (!account?.address) return;
+    if (!account?.address) {
+      setTracks([]);
+      return;
+    }
     deletedIdsRef.current = []; // clear tombstones on wallet switch
+    const currentAddress = normalizeAddress(account.address.toString());
+
     const load = async () => {
       try {
-        const address = normalizeAddress(account.address.toString());
-        const myTracks = await getAudioBlobs(address);
-        cacheTrackMetadata(myTracks); // persist commitment→title for Cloud Explorer
-        setTracks(myTracks.filter(t => !deletedIdsRef.current.includes(String(t.id))));
+        const myTracks = await getAudioBlobs(currentAddress, undefined, true);
+        cacheTrackMetadata(myTracks); 
+        
+        // [STRICT ISOLATION] Secondary filter to ensure no cross-account leakage
+        const filtered = myTracks.filter(t => 
+          normalizeAddress(t.owner || '') === currentAddress &&
+          !deletedIdsRef.current.includes(String(t.id))
+        );
+        
+        setTracks(filtered);
       } catch { /* getAudioBlobs already handles errors internally */ }
     };
     setTracks([]);
@@ -156,10 +274,9 @@ function App() {
   }, [account?.address]); // eslint-disable-line react-hooks/exhaustive-deps
 
   // ─── Visibility-aware polling with AbortController ───────────────────────────
-  // Each sync cycle creates a fresh AbortController so stale in-flight GQL
-  // requests are cancelled when a new cycle fires or the effect tears down.
   useEffect(() => {
     if (!account?.address) return;
+    const currentAddress = normalizeAddress(account.address.toString());
 
     let running = false;
     let timerId: ReturnType<typeof setTimeout>;
@@ -172,10 +289,15 @@ function App() {
       syncAbort?.abort(); // cancel any previous in-flight request
       syncAbort = new AbortController();
       try {
-        const address = normalizeAddress(account.address.toString());
-        const incoming = await getAudioBlobs(address, syncAbort.signal);
+        if (!account?.address) return;
+        const incoming = await getAudioBlobs(currentAddress, syncAbort.signal, true);
         if (!cancelled) {
-          setTracks(incoming.filter(t => !deletedIdsRef.current.includes(String(t.id))));
+          // [STRICT ISOLATION] Ensure polling data strictly belongs to active user
+          const merged = incoming.filter(t => 
+            normalizeAddress(t.owner || '') === currentAddress &&
+            !deletedIdsRef.current.includes(String(t.id))
+          );
+          setTracks(merged);
         }
       } finally {
         running = false;
@@ -195,8 +317,8 @@ function App() {
 
     return () => {
       cancelled = true;
+      syncAbort?.abort(); // [FORCE KILL] Stop any active sync from previous account
       clearTimeout(timerId);
-      syncAbort?.abort();
       document.removeEventListener('visibilitychange', onVisibility);
     };
   }, [account?.address]); // eslint-disable-line react-hooks/exhaustive-deps
@@ -207,12 +329,14 @@ function App() {
   const refreshLibrary = useCallback(async () => {
     if (!account?.address) return;
     try {
-      const address = normalizeAddress(account.address.toString());
-      const fresh = await getAudioBlobs(address);
-      cacheTrackMetadata(fresh); // persist commitment→title for Cloud Explorer
-      const newTracks = fresh.filter(t => !deletedIdsRef.current.includes(String(t.id)));
+      // Use raw address for querying
+      const rawAddress = account.address.toString();
+      const fresh = await getAudioBlobs(rawAddress, undefined, true);
+      cacheTrackMetadata(fresh);
+      const newTracks = fresh.filter(t => 
+        !deletedIdsRef.current.includes(String(t.id))
+      );
       setTracks(newTracks);
-      if (import.meta.env.DEV) console.log('AFTER REFRESH:', newTracks);
       showToast('Library refreshed', 'success');
     } catch {
       showToast('Refresh failed', 'error');
@@ -258,113 +382,155 @@ function App() {
     try {
       if (!signAndSubmitTransaction) throw new Error('Wallet not connected');
       
-      // The Shelby SDK createDeleteBlobPayload explicitly expects the blobName SUFFIX 
-      // without the account address prefix (e.g. "foo/bar.txt", not "@0x.../foo/bar.txt")
-      // Extract everything after the first slash.
       const suffixName = track.blobName.substring(track.blobName.indexOf('/') + 1);
       
-      // @ts-ignore
-      await deleteBlob({
-        blobName: suffixName,
-        signer: { signAndSubmitTransaction }
-      });
-    } catch (err: any) {
-      showToast(err?.message || 'Delete failed on Shelby network', 'error');
-      return; // preserve UI state if SDK call failed
-    }
-
-    // Release objectURL to free memory before removing from UI
-    cacheDelete(id);
-
-    // Tombstone the ID immediately so no fetch can re-add it
-    deletedIdsRef.current = [...deletedIdsRef.current, String(id)];
-    // Remove from UI immediately
-    setTracks(prev => prev.filter(t => t.id !== id));
-    showToast('Track removed from library', 'success');
-
-    // Refresh from indexer after a short delay to catch any sync lag
-    setTimeout(async () => {
+      // 1. DELETE FROM SHELBY (Blockchain)
       try {
-        if (!account?.address) return;
-        const address = normalizeAddress(account.address.toString());
-        const fresh = await getAudioBlobs(address);
-        setTracks(fresh.filter(t => !deletedIdsRef.current.includes(String(t.id))));
-      } catch { /* polling will catch it on next cycle */ }
-    }, 3000);
-  }, [tracks, signAndSubmitTransaction, deleteBlob, account?.address, cacheDelete]); // eslint-disable-line react-hooks/exhaustive-deps
+        // @ts-ignore
+        await deleteBlob({
+          blobName: suffixName,
+          signer: { signAndSubmitTransaction }
+        });
+      } catch (bcErr: any) {
+        // [SMART CLEANUP] If the blob is already gone from blockchain (0x3 / Not Found), 
+        // we should STILL proceed to clean up the Supabase metadata.
+        const errMsg = bcErr?.message || '';
+        if (errMsg.includes('0x3') || errMsg.includes('E_BLOB_NOT_FOUND') || errMsg.includes('not found')) {
+          if (import.meta.env.DEV) console.warn('[Cleanup] Blob already missing from chain. Proceeding with database cleanup.');
+        } else {
+          // If it's a DIFFERENT error (e.g. User rejected, Insufficient gas), we should STOP and show the error.
+          throw bcErr;
+        }
+      }
 
-  // Returns true when the track has a valid remote URL the browser can stream
-  // directly (http/https). Gateway URLs from Shelby qualify. Blob objectURLs
-  // and empty strings do NOT — they go through the SDK download path.
-  const canStream = (t: Track): boolean => {
-    if (!t.url) return false;
-    try {
-      const { protocol } = new URL(t.url);
-      return protocol === 'http:' || protocol === 'https:';
-    } catch {
-      return false;
+      // 2. DELETE FROM SUPABASE (Sync)
+      if (track.blob_commitment) {
+        await deleteMetadata(track.blob_commitment);
+        if (import.meta.env.DEV) console.log("SUPABASE SYNC-DELETE:", track.blob_commitment);
+      }
+
+      // 3. UPDATE UI
+      deletedIdsRef.current.push(String(id));
+      setTracks(prev => prev.filter(t => String(t.id) !== String(id)));
+      showToast('Track deleted successfully', 'success');
+    } catch (err: any) {
+      if (import.meta.env.DEV) console.error('Delete failed:', err);
+      showToast(err?.message || 'Delete failed. Check your wallet status.', 'error');
     }
-  };
+  }, [tracks, signAndSubmitTransaction, deleteBlob]); // eslint-disable-line react-hooks/exhaustive-deps
 
-  // ─── Blob fallback (extracted so both paths can call it) ─────────────────────
-  // Downloads the track via the Shelby SDK, builds a local objectURL, caches it,
-  // then sets audioRef.current.src. Identical to the original blob logic.
+
+  // ─── Official Blob Download (Back to Docs) ─────────────────────
+  // Downloads the track via the Shelby SDK (Official documented method).
   const loadBlobFallback = async (track: Track) => {
     const audio = audioRef.current;
     if (!audio) return;
+    
     try {
-      const owner = track.owner || account?.address?.toString();
-      if (!owner) throw new Error('Owner address missing for Shelby blob');
-      const suffixName = (track.blobName || '').substring((track.blobName || '').indexOf('/') + 1);
-
-      const blobData = await shelbyClient.download({ account: owner, blobName: suffixName });
-
-      if (blobData && blobData.readable) {
-        const reader = blobData.readable.getReader();
-        const chunks: Uint8Array[] = [];
-        while (true) {
-          const { done, value } = await reader.read();
-          if (done) break;
-          if (value) chunks.push(value);
-        }
-        const blob = new Blob(chunks as any, { type: 'audio/mpeg' });
-        const size = blob.size;
-        const localUrl = URL.createObjectURL(blob);
-
-        cacheSet(track.id, localUrl, size);
-        audio.src = localUrl;
-
-        audio.onloadedmetadata = () => {
-          const dur = audio.duration;
-          if (dur) {
-            setTrackDurations(prev => ({ ...prev, [track.id]: dur }));
-            setTrackSizes(prev => ({ ...prev, [track.id]: size }));
+      // [Official Alignment]: Murni menggunakan SDK sesuai dokumentasi
+      // Discovery di loadTrack menjamin data ini ada untuk Cloud Explorer.
+      const owner = track.owner || (activeView === 'library' ? account?.address?.toString() : null);
+      if (owner && track.blobName && track.blobName.length > 5) {
+        const suffixName = (track.blobName || '').substring((track.blobName || '').indexOf('/') + 1);
+        if (suffixName && suffixName.length > 5) {
+          try {
+            const blobData = await shelbyClient.download({ account: owner, blobName: suffixName });
+            if (blobData && blobData.readable) {
+              const reader = blobData.readable.getReader();
+              const chunks: Uint8Array[] = [];
+              while (true) {
+                const { done, value } = await reader.read();
+                if (done) break;
+                if (value) chunks.push(value);
+              }
+              const blob = new Blob(chunks as any, { type: 'audio/mpeg' });
+              const localUrl = URL.createObjectURL(blob);
+              cacheSet(track.id, localUrl, blob.size);
+              audio.src = localUrl;
+              audio.load();
+              setIsReconnecting(false);
+              return;
+            }
+          } catch (sdkErr: any) {
+            if (import.meta.env.DEV) console.error("[SDK] Call failed:", sdkErr.message);
+            
+            // [Memory Cache Protector]: Jika memutar dari Cache Lokal, blok ini akan bypass.
+            // Namun jika tidak, artinya file ini gagal dimuat karena namanya terpotong/mismatch
+            // di storage node (umumnya akibat karakter spesial saat upload).
+            if (audio.src && audio.src.startsWith('blob:')) {
+               if (import.meta.env.DEV) console.warn("[Fallback] Bypassed error 404: Audio securely playing via Memory Cache.");
+               return; 
+            }
+            
+            showToast('Lagu gagal dimuat. Kemungkinan file di jaringan terkorupsi (404). Silakan Re-upload lagu ini.', 'error');
+            setIsReconnecting(false);
           }
-        };
-        audio.load();
+        }
       } else {
-        audio.src = track.url; // last resort gateway URL
-        audio.load();
+        if (import.meta.env.DEV) console.warn("[SDK] Discovery incomplete for:", track.title);
+        showToast('Identifikasi lagu tertunda... Coba sebentar lagi.', 'error');
       }
     } catch (err: any) {
-      audio.src = track.url; // last resort gateway URL
-      audio.load();
-      showToast(err?.message || 'Failed to load track. Check your connection and try again.', 'error');
+      setIsReconnecting(false);
       setIsBuffering(false);
     }
   };
 
+  /**
+   * Helper to sync missing size/duration to Supabase.
+   * If a track is played and its technical metadata is missing, we capture it
+   * locally and push it to the global store so others can see it immediately.
+   */
+  const syncTrackMetadata = async (track: Track, detectedDuration: number, detectedSize?: number) => {
+    // Only sync if we have a valid commitment and the track is missing info
+    if (!track.blob_commitment) return;
+    
+    const needsDuration = !track.duration && detectedDuration > 0;
+    const needsSize = !track.size && detectedSize && detectedSize > 0;
+
+    if (needsDuration || needsSize) {
+      if (import.meta.env.DEV) console.log(`[Sync] Auto-detecting metadata for track: "${track.title}"`);
+      
+      const updatedMetadata: any = {
+        title: track.title,
+        artist: track.artist,
+        owner: track.owner,
+        is_public: !!track.is_public, // Maintain existing visibility
+        duration: track.duration || detectedDuration,
+        size: track.size || detectedSize,
+        blob_name: track.blobName || ''
+      };
+
+      try {
+        const success = await saveMetadata(track.blob_commitment, updatedMetadata);
+        if (success && import.meta.env.DEV) {
+          console.log(`[Sync] Metadata synced successfully: ${detectedDuration}s / ${detectedSize} bytes`);
+        }
+      } catch (err) {
+        if (import.meta.env.DEV) console.error("[Sync] Failed to auto-sync detected metadata:", err);
+      }
+    }
+  };
+
   const loadTrack = useCallback(async (track: Track, autoPlay = true, forcedPlaylist?: Track[]) => {
+    if (import.meta.env.DEV) console.log(`[LoadTrack] Attempting: "${track.title}" (ID: ${track.id}) from ${track.source}. forcedPlaylist: ${!!forcedPlaylist}`);
+
     let list = forcedPlaylist || (activeView === 'cloud-explorer' ? currentPlaylist : tracks);
-    let index = list.findIndex(t => t.id === track.id);
+    let index = list.findIndex(t => String(t.id).toLowerCase() === String(track.id).toLowerCase());
     
     // If it's still -1 but forcedPlaylist exists, definitely use forcedPlaylist
     if (index < 0 && forcedPlaylist) {
-      index = forcedPlaylist.findIndex(t => t.id === track.id);
+      index = forcedPlaylist.findIndex(t => String(t.id).toLowerCase() === String(track.id).toLowerCase());
       list = forcedPlaylist;
     }
     
-    if (index < 0) return;
+    if (index < 0) {
+      if (import.meta.env.DEV) console.warn(`[LoadTrack] Track not found in current context playlist.`, { trackId: track.id, listLength: list.length });
+      return;
+    }
+
+    // [Official Alignment]: Broken failsafe reconstruction removed to stop DNS errors.
+    // We now rely on Sanitizer and direct SDK/Portal path.
 
     // ── Concurrency guard: mint a unique token for THIS invocation ───────────────
     // Any previous async operation that reads activeLoadTokenRef and finds a
@@ -410,48 +576,52 @@ function App() {
     setTimeout(() => setIsArtFlashing(false), 400);
 
     if (audioRef.current) {
-      if (track.source === 'SHELBY') {
-        // ─── HYBRID STREAMING PATH ────────────────────────────────────────────
-        if (!cached && canStream(track)) {
-          // ── Stream: direct URL → browser handles buffering ──────────────────
-          audioRef.current.src = track.url;
-          audioRef.current.load(); // single load() call for streaming path
+      // [Official Sync v5]: Instant URL Sanitization
+      // [Official Portal Alignment]: ONLY wipe dead/old domains. 
+      // Preservation of gateway.shelby.xyz is vital for playback stability.
+      if (track.url && (track.url.includes('api.testnet.shelby.xyz') || track.url.includes('shelby.network'))) {
+        if (import.meta.env.DEV) console.log(`[Sanitizer] Cleaning old/broken URL: ${track.url}`);
+        track.url = '';
+      }
 
-          // One-shot error handler scoped strictly to THIS track/token.
-          // Stored in activeStreamErrorRef so the next loadTrack() can remove it
-          // before attaching its own handler — prevents stale-closure races.
-          const onStreamError = async () => {
-            activeStreamErrorRef.current = null;
-            if (isStale()) { setIsBuffering(false); return; } // guard: skip if superseded
-            await loadBlobFallback(track);
-            if (isStale()) { setIsBuffering(false); return; } // guard: after async await
-            if (autoPlay && audioRef.current) {
-              audioRef.current.play().catch(() => setIsBuffering(false));
-            } else {
-              setIsBuffering(false); // guarantee reset when autoPlay=false
+      // [SOUND-RECOVERY]: Early source assignment ensures play() doesn't fail on empty src.
+      // This is safe even if loadBlobFallback overwrites it later.
+      if (track.url) audioRef.current.src = track.url;
+      
+      if (track.source === 'SHELBY' || track.source === 'shelby') {
+        // [NORMAL PATH] ALWAYS prioritize Shelby SDK for Testnet playback.
+        
+        // [Unified Harmony Speed Fix]: Only run blocking Discovery if we are missing
+        // the identity (blobName). For Library tracks, identity is usually present.
+        if (!track.blobName && track.blob_commitment) {
+          if (import.meta.env.DEV) console.log(`[Discovery] Missing identity for "${track.title}". Discovery active...`);
+          
+          try {
+            // [Collision Fix]: Pass track.owner explicitly! Jika kita tidak mengarahkan ownernya,
+            // dan Indexer menyimpan 2 versi Hex ID yang berwujud sama (milik Keyless_Lama dan Petra_Baru),
+            // Indexer akan selalu mengembalikan versi Keyless_Lama yang cacat dan berujung 404!
+            const identity = await findBlobIdentity(track.blob_commitment, track.owner);
+            
+            if (identity) {
+              track.blobName = identity.blobName;
+              // Tetap sinkron namun kali ini dijamin tidak akan tersesat dari track.owner aslinya!
+              track.owner = identity.owner;
+              
+              if (import.meta.env.DEV) console.log(`[Discovery] Identity resolved: ${track.blobName} for owner: ${track.owner}. Syncing...`);
+              syncTrackMetadata(track, 0, 0); 
             }
-          };
-          activeStreamErrorRef.current = onStreamError;
-          audioRef.current.addEventListener('error', onStreamError, { once: true });
-
-          // For the streaming path, play() is called directly below (no extra load())
-
-        } else {
-          // ── Blob path (cached objectURL OR streaming not available) ──────────
-          await loadBlobFallback(track);
-          if (isStale()) { setIsBuffering(false); return; } // guard: after async download
-          // loadBlobFallback already calls audio.load() internally
+          } catch (discErr) {
+            if (import.meta.env.DEV) console.error(`[Discovery] Failed to find identity:`, discErr);
+          }
         }
+
+        await loadBlobFallback(track);
+        if (isStale()) { setIsBuffering(false); return; } 
       } else {
         // Non-SHELBY source (local files, etc.) — unchanged
         audioRef.current.src = track.url;
         audioRef.current.load(); // single explicit load() for non-SHELBY path
       }
-
-      // NOTE: No extra audio.load() here — each branch above handles its own load().
-      // The streaming branch called load() above; blob/non-SHELBY branches also call
-      // load() via loadBlobFallback or explicitly. A second load() would reset the
-      // buffered data and trigger spurious error events.
 
       if (autoPlay) {
         audioRef.current.play().then(() => {
@@ -573,9 +743,8 @@ function App() {
             formattedName = `${title}.mp3`;
           } else {
             // Keep original filename if no reliable ID3 tags exist
-            formattedName = file.name;
           }
-
+          
           // PHASE 2: Save structured metadata explicitly to local cache immediately
           try {
             const existing = JSON.parse(localStorage.getItem('track_metadata') || '{}');
@@ -586,11 +755,40 @@ function App() {
             localStorage.setItem('track_metadata', JSON.stringify(existing));
           } catch { /* storage unavailable */ }
 
+          // PHASE 3: Pre-detect duration for Supabase sync
+          let duration = 0;
+          try {
+            const tempAudio = new Audio();
+            const objectUrl = URL.createObjectURL(file);
+            tempAudio.src = objectUrl;
+            
+            duration = await new Promise<number>((resolve) => {
+              tempAudio.onloadedmetadata = () => {
+                const d = tempAudio.duration;
+                URL.revokeObjectURL(objectUrl);
+                resolve(d && !isNaN(d) ? d : 0);
+              };
+              tempAudio.onerror = () => {
+                URL.revokeObjectURL(objectUrl);
+                resolve(0);
+              };
+              // Wait up to 5 seconds for technical metadata
+              setTimeout(() => {
+                URL.revokeObjectURL(objectUrl);
+                resolve(0);
+              }, 5000);
+            });
+          } catch { duration = 0; }
+
           return {
             name: formattedName,
             file,
             data: new Uint8Array(buffer),
-            size: formatSize(file.size)
+            sizeRaw: file.size,
+            size: formatSize(file.size),
+            title: title || formattedName.replace(/\.[^.]+$/, '').trim(),
+            artist: artist || 'Unknown Artist',
+            duration
           };
         })
       );
@@ -618,56 +816,114 @@ function App() {
         ? account.address 
         : (account.address as any).toString();
 
+      if (!addressString) {
+        if (import.meta.env.DEV) console.error('[Upload] CRITICAL: Wallet address missing during sync');
+        showToast("Sync interrupted: Wallet ID not found", "error");
+        return;
+      }
+
       const blobDataList = preparedFiles.map(f => ({
         blobName: f.name,
         blobData: f.data
       }));
 
-      await upload({
-        blobs: blobDataList,
-        expirationMicros: (Date.now() + 1000 * 60 * 60 * 24 * 30) * 1000, 
-        // @ts-ignore
-        signer: { 
-          account, 
-          accountAddress: addressString,
-          signAndSubmitTransaction 
-        }
-      });
-
-      // FIX ID MISMATCH: Dynamic Indexer Callback Fetch
-      let freshTracks: Track[] = [];
-
-      for (let i = 0; i < 5; i++) {
-        freshTracks = await getAudioBlobs(addressString);
-        if (freshTracks.length > 0) break;
-        await new Promise(r => setTimeout(r, 2000));
+      // 1. PERFORM BLOB UPLOAD (Blockchain Transaction)
+      try {
+        if (import.meta.env.DEV) console.log(`[Upload] Triggering SDK upload on Testnet...`);
+        await upload({
+          blobs: blobDataList,
+          expirationMicros: (Date.now() + 1000 * 60 * 60 * 24 * 30) * 1000, 
+          // @ts-ignore
+          signer: { 
+            account, 
+            accountAddress: addressString,
+            signAndSubmitTransaction 
+          }
+        } as any);
+      } catch (err: any) {
+        if (import.meta.env.DEV) console.error("[Upload] SDK FAILURE:", err);
+        showToast("Upload SDK error. Cek konsol jika masalah berlanjut.", "error");
+        throw err; // rethrow to stop the sync process
       }
+      if (import.meta.env.DEV) console.log("UPLOAD SUCCESS — WAITING FOR INDEXER");
+      showToast("Transaction confirmed! Syncing metadata...", "success");
 
-      const latest = freshTracks[0];
+      // 2. WAIT FOR INDEXER PROPAGATION (Polling Delay)
+      // Capture the batch before clearing state — the setTimeout closure
+      // needs its own snapshot since setPreparedFiles([]) runs synchronously below.
+      const uploadedBatch = [...preparedFiles];
 
-      await Promise.all(
-        preparedFiles.map(async (f) => {
-          let title = f.name.replace(/\.[^.]+$/, '').trim();
-          let artist = 'Unknown Artist';
-          const match = title.match(/^(.+?)\s*[-–]\s*(.+)$/);
-          if (match) {
-            artist = match[1].trim();
-            title = match[2].trim();
+      setTimeout(async () => {
+        try {
+          // 3. FETCH UPDATED TRACKS FROM INDEXER (Disable filter to see new uploads)
+          const indexerTracks = await getAudioBlobs(addressString, undefined, false);
+          if (import.meta.env.DEV) console.log("INDEXER FULL:", indexerTracks);
+
+          // 4. BATCH MATCH & SAVE — iterate ALL uploaded files, not just the first match
+          let savedCount = 0;
+          let failedCount = 0;
+
+          for (const file of uploadedBatch) {
+            // Match this prepared file to its on-chain record via blobName suffix
+            const matchedTrack = indexerTracks.find(t => {
+              const suffix = t.blobName?.substring(t.blobName.indexOf('/') + 1);
+              return suffix === file.name;
+            });
+
+            if (!matchedTrack || !matchedTrack.blob_commitment) {
+              if (import.meta.env.DEV) console.warn(`[Sync] No indexer match for: ${file.name}`);
+              failedCount++;
+              continue;
+            }
+
+            // 5. SAVE METADATA (SUPABASE) — one call per file
+            if (import.meta.env.DEV) console.log(`SYNCING METADATA [${file.name}]:`, matchedTrack.blob_commitment);
+
+            const insertSuccess = await saveMetadata(matchedTrack.blob_commitment, {
+              title: file.title || file.name.replace(/\.[^.]+$/, '').trim(),
+              artist: file.artist || 'Unknown Artist',
+              owner: addressString,
+              is_public: true, // Default to Public so it shows in Cloud Explorer
+              size: Number(file.sizeRaw) || 0,
+              duration: Number(file.duration) || 0
+            });
+
+            if (insertSuccess) {
+              savedCount++;
+              // Instant UI Update: Update local states so the user sees size/duration immediately
+              const trackId = String(matchedTrack.blob_commitment);
+              setTrackDurations(prev => ({ ...prev, [trackId]: file.duration ?? 0 }));
+              setTrackSizes(prev => ({ ...prev, [trackId]: file.sizeRaw ?? 0 }));
+              if (import.meta.env.DEV) console.log(`METADATA OK: ${file.title} — ${file.artist}`);
+            } else {
+              failedCount++;
+              if (import.meta.env.DEV) console.error(`METADATA FAILED for: ${file.name}`);
+            }
           }
 
-          if (latest) {
-            const blobCommitment = latest.id.toString();
-            return saveMetadata(blobCommitment, { title, artist, owner: addressString });
-          }
-        })
-      );
+          // 6. REFRESH UI
+          if (refreshLibrary) await refreshLibrary();
 
+          if (failedCount === 0) {
+            showToast(`Sync Complete! ${savedCount} song(s) added`, "success");
+          } else {
+            showToast(`Synced ${savedCount}/${uploadedBatch.length} — ${failedCount} failed`, "error");
+          }
+        } catch (err) {
+          if (import.meta.env.DEV) console.error("Indexer polling failed:", err);
+          showToast("Metadata sync failed — check console", "error");
+        }
+      }, 5000);
+
+      // 6. UI FINALIZE
       setPreparedFiles([]);
       setUploadStatus('success');
       showToast("Upload Successful! Syncing library...", "success");
       
-      // The indexer usually takes ~1-3 seconds to see the new blob.
-      setTimeout(() => { refreshLibrary(); }, 2500);
+      setTimeout(() => { 
+        if (refreshLibrary) refreshLibrary(); 
+      }, 3000);
+      
       setTimeout(() => { setUploadStatus('idle'); }, 4000);
     } catch (e: any) {
       setUploadStatus('error');
@@ -678,21 +934,37 @@ function App() {
 
   // PHASE 5: Visibility Toggle Handler
   const handleToggleVisibility = async (track: Track) => {
+    if (!track.blob_commitment) {
+      if (import.meta.env.DEV) console.error("INVALID COMMITMENT — SKIP TOGGLE");
+      return;
+    }
+
     if (import.meta.env.DEV) console.log('TOGGLE CLICK:', track.id, track.is_public);
 
-    // FAST UX FIX: Optimistically update UI instantly while fetch happens in background
-    setTracks(prev =>
-      prev.map(t =>
-        t.id === track.id
-          ? { ...t, is_public: !t.is_public }
-          : t
-      )
-    );
+    try {
+      const newValue = !track.is_public;
+      if (import.meta.env.DEV) console.log('[Sync] Updating visibility to:', newValue);
 
-    await updateTrackVisibility(track.id.toString(), !track.is_public);
-    
-    // SAFE: refresh data setelah update (akan menarik status Supabase terbaru)
-    if (refreshLibrary) await refreshLibrary();
+      // MANDATORY: Update UI only AFTER Supabase confirms success
+      const success = await updateTrackVisibility(track.blob_commitment, newValue);
+
+      if (success) {
+        setTracks(prev =>
+          prev.map(t =>
+            t.id === track.id
+              ? { ...t, is_public: newValue }
+              : t
+          )
+        );
+        if (refreshLibrary) await refreshLibrary();
+        if (import.meta.env.DEV) console.log('[Sync] UI correctly updated for:', track.title);
+      } else {
+        if (import.meta.env.DEV) console.error("UPDATE FAILED — UI NOT UPDATED");
+        showToast("Toggle failed: Record not found in sync service", "error");
+      }
+    } catch (err) {
+      if (import.meta.env.DEV) console.error('[Sync] System error during toggle:', err);
+    }
   };
 
   useEffect(() => {
@@ -781,6 +1053,89 @@ function App() {
   const dismissSidebar = useCallback(() => {
     setSidebarOpen(false);
   }, []);
+
+  /**
+   * GSAP RESPONSIVE (MatchMedia)
+   * Synchronizes layout transitions and animations between Mobile and Desktop.
+   */
+  useLayoutEffect(() => {
+    const mm = gsap.matchMedia();
+
+    // [1] MOBILE PROFILE (< 1024px)
+    mm.add("(max-width: 1023px)", () => {
+      if (sidebarOpen) {
+        // Show overlay and slide sidebar in
+        gsap.set(".sidebar-overlay", { display: 'block' });
+        gsap.to(".sidebar-overlay", { opacity: 1, duration: 0.3 });
+      } else {
+        // Hide overlay and slide sidebar out
+        gsap.to(".sidebar-overlay", { 
+          opacity: 0, 
+          duration: 0.3, 
+          onComplete: () => { gsap.set(".sidebar-overlay", { display: 'none' }); } 
+        });
+      }
+      return () => {
+        gsap.set(".sidebar-overlay", { clearProps: "all" });
+      };
+    });
+
+    // [2] DESKTOP PROFILES (>= 1024px)
+    mm.add("(min-width: 1024px)", () => {
+      // 1. Fixed Sidebar Setup
+      gsap.set(".sidebar-overlay", { display: 'none', opacity: 0 });
+      gsap.set(".sidebar", { clearProps: "transform,visibility,opacity" });
+
+      // 2. Nested Scaling Profiles
+      const mqNarrow = gsap.matchMedia();
+      
+      // NARROW DESKTOP (Desktop Site HP / Small Laptops)
+      mqNarrow.add("(max-width: 1365px)", () => {
+        gsap.to(":root", {
+          "--track-grid-lib":   "38px minmax(0, 1fr) 75px 60px 145px",
+          "--track-grid-cloud": "38px minmax(0, 1fr) 90px 75px",
+          "--track-actions-scale": 0.85,
+          duration: 0.4,
+          ease: "power2.out"
+        });
+      });
+
+      // WIDE DESKTOP (Full Monitor)
+      mqNarrow.add("(min-width: 1366px)", () => {
+        gsap.to(":root", {
+          "--track-grid-lib":   "48px minmax(0, 6fr) 120px 100px 160px",
+          "--track-grid-cloud": "48px minmax(0, 6fr) 140px 120px",
+          "--track-actions-scale": 1,
+          duration: 0.4,
+          ease: "power2.out"
+        });
+      });
+
+      return () => mqNarrow.revert();
+    });
+
+    return () => mm.revert();
+  }, [sidebarOpen]);
+
+  /**
+   * MEMOIZED CLOUD EXPLORER HANDLERS
+   * Prevents CloudExplorer from re-rendering every time global App state updates.
+   */
+  const handleCloudTrackSelect = useCallback((track: Track, allTracks?: Track[]) => {
+    // [IMMEDIATE-SYNC]: Force playlist context before loading
+    if (allTracks) {
+      setCurrentPlaylist(allTracks);
+    }
+    loadTrack(track, true, allTracks);
+  }, [loadTrack]);
+
+  const cloudCurrentIndex = useMemo(() => {
+    // Only show "Playing" icon in Cloud Explorer if the current playlist is from Shelby (Cloud)
+    const isCloudPlaylist = currentPlaylist.length > 0 && 
+                           (currentPlaylist[0].source === 'SHELBY' || currentPlaylist[0].source === 'shelby');
+    return isCloudPlaylist ? currentIndex : -1;
+  }, [currentPlaylist, currentIndex]);
+
   return (
     <div className="app">
       <header className="mobile-header">
@@ -789,11 +1144,15 @@ function App() {
             <path d="M3 12h18M3 6h18M3 18h18"/>
           </svg>
         </button>
-        <div className="logo-text"><span>Shelby Sound Network</span></div>
         <div style={{ width: '40px' }}></div>
       </header>
 
-      {sidebarOpen && <div className="sidebar-overlay" onClick={dismissSidebar}></div>}
+      <div 
+        className="sidebar-overlay" 
+        ref={overlayRef} 
+        style={{ display: 'none' }} 
+        onClick={dismissSidebar}
+      ></div>
 
       <div className="content-area">
         <Sidebar 
@@ -805,24 +1164,39 @@ function App() {
           onClose={dismissSidebar}
         />
 
-        <main className="main">
+        <main className="main" ref={mainRef}>
           {activeView === 'library' && (() => {
-            const userTracks = tracks.filter((track) => track.owner === account?.address?.toString());
+            const filteredTracks = tracks.filter(t =>
+              !debouncedLibrarySearch ||
+              t.title.toLowerCase().includes(debouncedLibrarySearch.toLowerCase()) ||
+              t.artist.toLowerCase().includes(debouncedLibrarySearch.toLowerCase())
+            );
+
+            const totalLibraryPages = Math.ceil(filteredTracks.length / libraryLimit);
+            const paginatedTracks = filteredTracks.slice((libraryPage - 1) * libraryLimit, libraryPage * libraryLimit);
+
             return (
-              <div className="view">
+              <div className="view" style={{ paddingBottom: typeof window !== 'undefined' && window.innerWidth < 768 ? '250px' : '20px' }}>
                 <div className="view-header">
-                  <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
-                    <div>
+                  <div className="view-header-container" style={{ 
+                    display: 'flex', 
+                    alignItems: 'center', 
+                    justifyContent: 'space-between',
+                    width: '100%',
+                    flexWrap: 'wrap'
+                  }}>
+                    <div className="view-header-main" style={{ flex: 1 }}>
                       <div className="view-title">
                         Library
                         <span className="track-count-badge">
-                          {userTracks.length} track{userTracks.length !== 1 ? 's' : ''}
+                          {filteredTracks.length} track{filteredTracks.length !== 1 ? 's' : ''}
                         </span>
                       </div>
-                      <div className="view-subtitle">YOUR MUSIC COLLECTION</div>
+                      <div className="view-subtitle">YOUR MUSIC COLLECTION — TESTNET</div>
                     </div>
                     <button
                       onClick={refreshLibrary}
+                      className="refresh-btn-main"
                       disabled={!account?.address}
                       style={{
                         padding: '6px 14px',
@@ -849,11 +1223,13 @@ function App() {
                     </button>
                   </div>
                 </div>
-                {/* Library Search Bar */}
                 <input
                   type="text"
                   value={librarySearch}
-                  onChange={e => setLibrarySearch(e.target.value)}
+                  onChange={e => {
+                    setLibrarySearch(e.target.value);
+                    setLibraryPage(1); // Reset to page 1 on search
+                  }}
                   placeholder="Search title or artist..."
                   style={{
                     width: '100%', margin: '10px 0 6px', padding: '8px 14px',
@@ -862,50 +1238,82 @@ function App() {
                     fontFamily: 'Inter, sans-serif', outline: 'none', boxSizing: 'border-box'
                   }}
                 />
-                <div className="track-list-header track-grid">
-                  <div className="track-num">#</div>
-                  <div className="track-info">TITLE</div>
-                  <div className="track-size hidden sm:flex">SIZE</div>
-                  <div className="track-duration hidden sm:flex">DURATION</div>
-                  <div className="track-actions hidden sm:flex">ACTIONS</div>
+                <div ref={libraryListRef}>
+                  <div className="track-list-header track-grid lib-grid">
+                    <div className="track-num">#</div>
+                    <div className="track-info">TITLE</div>
+                    <div className="track-size hidden sm:flex">SIZE</div>
+                    <div className="track-duration hidden sm:flex">DURATION</div>
+                    <div className="track-actions hidden sm:flex">ACTIONS</div>
+                  </div>
+                  <div className="mobile-track-container" style={{ 
+                    height: typeof window !== 'undefined' && window.innerWidth < 768 ? '285px' : 'auto', 
+                    overflowY: typeof window !== 'undefined' && window.innerWidth < 768 ? 'scroll' : 'visible'
+                  }}>
+                    <TrackList 
+                      tracks={paginatedTracks} 
+                      currentIndex={currentPlaylist === tracks ? currentIndex : -1}
+                      isPlaying={isPlaying} 
+                      onTrackSelect={(i) => loadTrack(paginatedTracks[i], true)}
+                      onToggleVisibility={handleToggleVisibility}
+                      onDelete={handleDelete}
+                      formatTime={formatTime}
+                      formatSize={formatSize}
+                      durations={trackDurations}
+                      sizes={trackSizes}
+                      pageOffset={(libraryPage - 1) * libraryLimit}
+                      variant="library"
+                    />
+                  </div>
                 </div>
-                <TrackList 
-                  tracks={userTracks.filter(t =>
-                    !debouncedLibrarySearch ||
-                    t.title.toLowerCase().includes(debouncedLibrarySearch.toLowerCase()) ||
-                    t.artist.toLowerCase().includes(debouncedLibrarySearch.toLowerCase())
-                  )} 
-                  currentIndex={currentPlaylist === userTracks ? currentIndex : -1}
-                  isPlaying={isPlaying} 
-                  onTrackSelect={(i) => {
-                    const filtered = userTracks.filter(t =>
-                      !debouncedLibrarySearch ||
-                      t.title.toLowerCase().includes(debouncedLibrarySearch.toLowerCase()) ||
-                      t.artist.toLowerCase().includes(debouncedLibrarySearch.toLowerCase())
-                    );
-                    loadTrack(filtered[i], true);
-                  }}
-                  onToggleVisibility={handleToggleVisibility}
-                  onDelete={handleDelete}
-                  formatTime={formatTime}
-                  formatSize={formatSize}
-                  durations={trackDurations}
-                  sizes={trackSizes}
-                />
+
+                {totalLibraryPages > 1 && (
+                  <div ref={libraryPaginationRef} className="pagination-container" style={{ 
+                    marginBottom: typeof window !== 'undefined' && window.innerWidth < 768 ? '120px' : '10px'
+                  }}>
+                    <div className="pagination-controls">
+                      <button
+                        onClick={() => handleLibraryPageChange(libraryPage - 1, totalLibraryPages)}
+                        disabled={libraryPage === 1}
+                        className="pagination-btn"
+                        title="Previous Page"
+                      >
+                        ←
+                      </button>
+                      
+                      {Array.from({ length: totalLibraryPages }, (_, i) => i + 1).map(p => (
+                        <button
+                          key={p}
+                          onClick={() => handleLibraryPageChange(p, totalLibraryPages)}
+                          className={`pagination-btn ${p === libraryPage ? 'active' : ''}`}
+                        >
+                          {p}
+                        </button>
+                      ))}
+
+                      <button
+                        onClick={() => handleLibraryPageChange(libraryPage + 1, totalLibraryPages)}
+                        disabled={libraryPage === totalLibraryPages}
+                        className="pagination-btn"
+                        title="Next Page"
+                      >
+                        →
+                      </button>
+                    </div>
+                    
+                    <div className="pagination-info">
+                      LIBRARY PAGE {libraryPage} OF {totalLibraryPages}
+                    </div>
+                  </div>
+                )}
               </div>
             );
           })()}
 
           {activeView === 'cloud-explorer' && (
             <CloudExplorer 
-              onTrackSelect={(track: Track, allTracks?: Track[]) => {
-                if (currentPlaylist.length > 0 && currentPlaylist[currentIndex]?.id === track.id) {
-                  togglePlay();
-                } else {
-                  loadTrack(track, true, allTracks);
-                }
-              }}
-              currentIndex={currentPlaylist.length > 0 && currentPlaylist[0].source === 'SHELBY' ? currentIndex : -1}
+              onTrackSelect={handleCloudTrackSelect}
+              currentIndex={cloudCurrentIndex}
               isPlaying={isPlaying}
               formatTime={formatTime}
               formatSize={formatSize}
@@ -918,7 +1326,7 @@ function App() {
             <div className="view">
               <div className="view-header">
                 <div className="view-title">Upload</div>
-                <div className="view-subtitle">ADD TRACKS TO YOUR LIBRARY</div>
+                <div className="view-subtitle">ADD TRACKS TO TESTNET LIBRARY</div>
               </div>
               <UploadZone onFilesSelected={handleFilesSelected} />
               
@@ -961,7 +1369,7 @@ function App() {
                     ) : (
                       <>
                         <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="17 8 12 3 7 8"/><line x1="12" y1="3" x2="12" y2="15"/></svg>
-                        SYNC TO SHELBY NETWORK
+                        SYNC TO TESTNET
                       </>
                     )}
                   </button>
@@ -986,7 +1394,7 @@ function App() {
               
               {uploadStatus === 'uploading' && !preparedFiles.length && (
                 <div style={{ textAlign: 'center', color: 'var(--accent)', margin: '16px var(--gutter)', fontSize: '13px', fontFamily: '"Space Mono", monospace' }}>
-                  Uploading to Shelby Network...
+                  Uploading to Testnet Network...
                 </div>
               )}
               {uploadStatus === 'success' && (
@@ -1001,14 +1409,14 @@ function App() {
               )}
               {connected && network?.name !== Network.TESTNET && (
                 <div style={{ textAlign: 'center', color: '#ff4b2b', margin: '16px var(--gutter)', fontSize: '12px', fontFamily: '"Space Mono", monospace' }}>
-                  Please switch to Aptos Testnet
+                  Please switch to Shelby Testnet
                 </div>
               )}
               <div className="shelby-notice">
-                <div className="shelby-title">⚡ Shelby Integration — Phase 1 Active</div>
+                <div className="shelby-title">⚡ Shelby Integration Active</div>
                 <div className="shelby-desc">
                   Decentralized storage gateway is initializing. Connect your Aptos wallet to begin syncing
-                  your library to the Shelby Network. Cloud tracks are now visible in the Cloud Explorer tab.
+                  your library to the Testnet. Cloud tracks are now visible in the Cloud Explorer tab.
                 </div>
               </div>
             </div>
@@ -1053,6 +1461,7 @@ function App() {
                   </div>
                 </div>
 
+
                 <div className="settings-card">
                   <div className="settings-card-title">Visuals</div>
                   <div className="settings-row">
@@ -1070,26 +1479,34 @@ function App() {
                 </div>
 
                 <div className="settings-card">
+                  <div className="settings-card-title">Network</div>
+                  <div className="settings-row">
+                    <div className="settings-label">Active Connection</div>
+                    <div className="settings-value" style={{ color: 'var(--accent)', display: 'flex', alignItems: 'center', gap: '12px' }}>
+                      <div className="pulse-dot" style={{ position: 'relative', top: '0', right: '0' }}></div>
+                      Shelby Testnet
+                    </div>
+                  </div>
+                  <div className="settings-row" style={{ marginTop: '8px' }}>
+                    <div className="settings-label" style={{ fontSize: '11px', opacity: 0.5 }}>Gateway Status</div>
+                    <div className="settings-value" style={{ fontSize: '11px', color: 'var(--accent-green)', letterSpacing: '1px' }}>ONLINE</div>
+                  </div>
+                </div>
+
+                <div className="settings-card">
                   <div className="settings-card-title">Storage & Cache</div>
                   <div className="settings-row">
                     <div className="settings-label">Local Cache Usage</div>
-                    <div className="settings-value">45.2 MB / 256 MB</div>
+                    <div className="settings-value">
+                      {(cacheUsageBytes / (1024 * 1024)).toFixed(1)} MB / {(CACHE_MAX_BYTES / (1024 * 1024)).toFixed(0)} MB
+                    </div>
                   </div>
                   <div className="cache-bar-container">
-                    <div className="cache-bar-fill" style={{ width: '18%' }}></div>
+                    <div className="cache-bar-fill" style={{ width: `${Math.min((cacheUsageBytes / CACHE_MAX_BYTES) * 100, 100)}%` }}></div>
                   </div>
                   <button className="settings-action-btn" onClick={clearCache}>Clear All Cache</button>
                 </div>
 
-                <div className="settings-card">
-                  <div className="settings-card-title">Network</div>
-                  <div className="settings-row">
-                    <div className="settings-label">Environment Status</div>
-                    <div className="settings-value" style={{ color: 'var(--accent-green)' }}>
-                      Shelby Testnet (Active)
-                    </div>
-                  </div>
-                </div>
 
                 <div className="settings-card">
                   <div className="settings-row" style={{ flexDirection: 'column', alignItems: 'flex-start', gap: '12px' }}>
@@ -1119,6 +1536,7 @@ function App() {
         currentTrack={currentTrack}
         isPlaying={isPlaying}
         isBuffering={isBuffering}
+        isReconnecting={isReconnecting}
         isShuffle={isShuffle}
         isLoop={isLoop}
         volume={volume}
