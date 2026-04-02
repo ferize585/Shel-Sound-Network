@@ -1,4 +1,4 @@
-import { useState, useRef, useEffect, useCallback, useLayoutEffect, useMemo } from 'react';
+import { useState, useRef, useEffect, useCallback, useLayoutEffect } from 'react';
 import gsap from 'gsap';
 
 // GSAP matchMedia is core, no extra plugins needed
@@ -17,6 +17,8 @@ import './index.css';
 import { useWallet } from '@aptos-labs/wallet-adapter-react';
 import { Network } from '@aptos-labs/ts-sdk';
 import { useUploadBlobs, useDeleteBlob, useShelbyClient } from '@shelby-protocol/react';
+
+const PENDING_SYNC_KEY = 'ssn_pending_sync_v2';
 
 function App() {
   const [tracks, setTracks] = useState<Track[]>([]);
@@ -350,6 +352,69 @@ function App() {
     const t = setTimeout(() => setDebouncedLibrarySearch(librarySearch), 300);
     return () => clearTimeout(t);
   }, [librarySearch]);
+
+  // ─── Self-Healing Recovery Loop ──────────────────────────────────────────────
+  useEffect(() => {
+    if (!connected || !account?.address) return;
+    const currentAddress = normalizeAddress(account.address.toString());
+
+    const recover = async () => {
+      try {
+        const rawPending = localStorage.getItem(PENDING_SYNC_KEY);
+        if (!rawPending) return;
+
+        let pendingList: any[] = JSON.parse(rawPending);
+        if (!Array.isArray(pendingList) || pendingList.length === 0) return;
+
+        pendingList = pendingList.filter(p => normalizeAddress(p.owner) === currentAddress);
+        if (pendingList.length === 0) return;
+
+        if (import.meta.env.DEV) console.log(`[Recovery] Checking ${pendingList.length} items...`);
+
+        const indexerTracks = await getAudioBlobs(currentAddress, undefined, false);
+        const newlySynced: string[] = [];
+
+        for (const item of pendingList) {
+          const matched = indexerTracks.find(t => {
+            const suffix = t.blobName?.substring(t.blobName.indexOf('/') + 1);
+            return suffix === item.name;
+          });
+
+          if (matched && matched.blob_commitment) {
+            const success = await saveMetadata(matched.blob_commitment, {
+              title: item.title,
+              artist: item.artist,
+              owner: item.owner,
+              is_public: true,
+              size: item.sizeRaw || 0,
+              duration: item.duration || 0
+            });
+
+            if (success) {
+              newlySynced.push(item.name);
+              const trackId = String(matched.blob_commitment);
+              setTrackDurations(prev => ({ ...prev, [trackId]: item.duration ?? 0 }));
+              setTrackSizes(prev => ({ ...prev, [trackId]: item.sizeRaw ?? 0 }));
+            }
+          }
+        }
+
+        if (newlySynced.length > 0) {
+          const updated = pendingList.filter(p => !newlySynced.includes(p.name));
+          if (updated.length > 0) localStorage.setItem(PENDING_SYNC_KEY, JSON.stringify(updated));
+          else localStorage.removeItem(PENDING_SYNC_KEY);
+          if (refreshLibrary) refreshLibrary();
+          showToast(`Recovered ${newlySynced.length} track(s) to library`, "success");
+        }
+      } catch (err) {
+        if (import.meta.env.DEV) console.error("[Recovery] Error:", err);
+      }
+    };
+
+    recover();
+    const interval = setInterval(recover, 15000);
+    return () => clearInterval(interval);
+  }, [connected, account?.address, refreshLibrary]);
 
 
   const showToast = (msg: string, type: 'success' | 'error' = 'success') => {
@@ -824,15 +889,32 @@ function App() {
         return;
       }
 
-      const blobDataList = preparedFiles.map(f => ({
-        blobName: f.name,
-        blobData: f.data
+      // 1. SAVE TO PERSISTENT QUEUE (Protection against Refresh/Crash)
+      const syncItems = preparedFiles.map(f => ({
+        name: f.name,
+        title: f.title,
+        artist: f.artist,
+        sizeRaw: f.sizeRaw,
+        duration: f.duration,
+        owner: addressString,
+        ts: Date.now()
       }));
 
-      // 1. PERFORM BLOB UPLOAD (Blockchain Transaction)
+      try {
+        const existing = JSON.parse(localStorage.getItem(PENDING_SYNC_KEY) || '[]');
+        localStorage.setItem(PENDING_SYNC_KEY, JSON.stringify([...existing, ...syncItems]));
+      } catch { /* ignore quota errors */ }
+
+      // 2. PERFORM BLOB UPLOAD (Blockchain Transaction)
+      let sdkResponse: any = null;
       try {
         if (import.meta.env.DEV) console.log(`[Upload] Triggering SDK upload on Testnet...`);
-        await upload({
+        const blobDataList = preparedFiles.map(f => ({
+          blobName: f.name,
+          blobData: f.data
+        }));
+
+        sdkResponse = await upload({
           blobs: blobDataList,
           expirationMicros: (Date.now() + 1000 * 60 * 60 * 24 * 30) * 1000,
           // @ts-ignore
@@ -842,91 +924,133 @@ function App() {
             signAndSubmitTransaction
           }
         } as any);
+
+        if (import.meta.env.DEV) console.log("[Upload] SDK SUCCESS Response:", sdkResponse);
       } catch (err: any) {
         if (import.meta.env.DEV) console.error("[Upload] SDK FAILURE:", err);
         showToast("Upload SDK error. Cek konsol jika masalah berlanjut.", "error");
-        throw err; // rethrow to stop the sync process
+        // Remove from pending if user cancelled or hard failure
+        try {
+          const currentPending = JSON.parse(localStorage.getItem(PENDING_SYNC_KEY) || '[]');
+          const filtered = currentPending.filter((p: any) => !syncItems.some(s => s.name === p.name));
+          if (filtered.length > 0) localStorage.setItem(PENDING_SYNC_KEY, JSON.stringify(filtered));
+          else localStorage.removeItem(PENDING_SYNC_KEY);
+        } catch { }
+        throw err;
       }
-      if (import.meta.env.DEV) console.log("UPLOAD SUCCESS — WAITING FOR INDEXER");
+
       showToast("Transaction confirmed! Syncing metadata...", "success");
 
-      // 2. WAIT FOR INDEXER PROPAGATION (Polling Delay)
-      // Capture the batch before clearing state — the setTimeout closure
-      // needs its own snapshot since setPreparedFiles([]) runs synchronously below.
+      // 3. INSTANT SYNC (Using SDK Response for immediate result)
       const uploadedBatch = [...preparedFiles];
+      let pendingFiles = [...uploadedBatch];
+      let totalSaved = 0;
 
-      setTimeout(async () => {
-        try {
-          // 3. FETCH UPDATED TRACKS FROM INDEXER (Disable filter to see new uploads)
-          const indexerTracks = await getAudioBlobs(addressString, undefined, false);
-          if (import.meta.env.DEV) console.log("INDEXER FULL:", indexerTracks);
+      if (sdkResponse && Array.isArray(sdkResponse.blobs)) {
+        if (import.meta.env.DEV) console.log(`[Sync] Performing Instant SDK-based Sync for ${sdkResponse.blobs.length} blobs...`);
+        
+        for (const sdkBlob of sdkResponse.blobs) {
+          const commitment = sdkBlob.blobCommitment || sdkBlob.blob_commitment;
+          const blobNameRaw = sdkBlob.blobName || sdkBlob.blob_name;
+          
+          if (!commitment) continue;
 
-          // 4. BATCH MATCH & SAVE — iterate ALL uploaded files, not just the first match
-          let savedCount = 0;
-          let failedCount = 0;
+          const file = uploadedBatch.find(f => {
+             const suffix = blobNameRaw?.substring(blobNameRaw.indexOf('/') + 1);
+             return suffix === f.name || blobNameRaw === f.name;
+          });
 
-          for (const file of uploadedBatch) {
-            // Match this prepared file to its on-chain record via blobName suffix
-            const matchedTrack = indexerTracks.find(t => {
-              const suffix = t.blobName?.substring(t.blobName.indexOf('/') + 1);
-              return suffix === file.name;
-            });
-
-            if (!matchedTrack || !matchedTrack.blob_commitment) {
-              if (import.meta.env.DEV) console.warn(`[Sync] No indexer match for: ${file.name}`);
-              failedCount++;
-              continue;
-            }
-
-            // 5. SAVE METADATA (SUPABASE) — one call per file
-            if (import.meta.env.DEV) console.log(`SYNCING METADATA [${file.name}]:`, matchedTrack.blob_commitment);
-
-            const insertSuccess = await saveMetadata(matchedTrack.blob_commitment, {
-              title: file.title || file.name.replace(/\.[^.]+$/, '').trim(),
-              artist: file.artist || 'Unknown Artist',
+          if (file) {
+            const success = await saveMetadata(commitment, {
+              title: file.title,
+              artist: file.artist,
               owner: addressString,
-              is_public: true, // Default to Public so it shows in Cloud Explorer
+              is_public: true,
               size: Number(file.sizeRaw) || 0,
               duration: Number(file.duration) || 0
             });
 
-            if (insertSuccess) {
-              savedCount++;
-              // Instant UI Update: Update local states so the user sees size/duration immediately
-              const trackId = String(matchedTrack.blob_commitment);
+            if (success) {
+              totalSaved++;
+              const trackId = String(commitment);
               setTrackDurations(prev => ({ ...prev, [trackId]: file.duration ?? 0 }));
               setTrackSizes(prev => ({ ...prev, [trackId]: file.sizeRaw ?? 0 }));
-              if (import.meta.env.DEV) console.log(`METADATA OK: ${file.title} — ${file.artist}`);
-            } else {
-              failedCount++;
-              if (import.meta.env.DEV) console.error(`METADATA FAILED for: ${file.name}`);
+              pendingFiles = pendingFiles.filter(f => f.name !== file.name);
+              try {
+                const currentPending = JSON.parse(localStorage.getItem(PENDING_SYNC_KEY) || '[]');
+                const filtered = currentPending.filter((p: any) => p.name !== file.name);
+                if (filtered.length > 0) localStorage.setItem(PENDING_SYNC_KEY, JSON.stringify(filtered));
+                else localStorage.removeItem(PENDING_SYNC_KEY);
+              } catch { }
             }
           }
-
-          // 6. REFRESH UI
-          if (refreshLibrary) await refreshLibrary();
-
-          if (failedCount === 0) {
-            showToast(`Sync Complete! ${savedCount} song(s) added`, "success");
-          } else {
-            showToast(`Synced ${savedCount}/${uploadedBatch.length} — ${failedCount} failed`, "error");
-          }
-        } catch (err) {
-          if (import.meta.env.DEV) console.error("Indexer polling failed:", err);
-          showToast("Metadata sync failed — check console", "error");
         }
-      }, 5000);
+      }
 
-      // 6. UI FINALIZE
+      // 4. SMART POLLING FALLBACK
+      if (pendingFiles.length > 0) {
+        let attempt = 0;
+        const maxAttempts = 8;
+
+        const attemptSync = async () => {
+          if (pendingFiles.length === 0) return;
+          attempt++;
+          try {
+            const indexerTracks = await getAudioBlobs(addressString, undefined, false);
+            const newlySynced: typeof pendingFiles = [];
+
+            for (const file of pendingFiles) {
+              const matched = indexerTracks.find(t => {
+                const suffix = t.blobName?.substring(t.blobName.indexOf('/') + 1);
+                return suffix === file.name;
+              });
+
+              if (matched && matched.blob_commitment) {
+                const success = await saveMetadata(matched.blob_commitment, {
+                  title: file.title,
+                  artist: file.artist,
+                  owner: addressString,
+                  is_public: true,
+                  size: Number(file.sizeRaw) || 0,
+                  duration: Number(file.duration) || 0
+                });
+
+                if (success) {
+                  totalSaved++;
+                  const trackId = String(matched.blob_commitment);
+                  setTrackDurations(prev => ({ ...prev, [trackId]: file.duration ?? 0 }));
+                  setTrackSizes(prev => ({ ...prev, [trackId]: file.sizeRaw ?? 0 }));
+                  newlySynced.push(file);
+                  try {
+                    const currentPending = JSON.parse(localStorage.getItem(PENDING_SYNC_KEY) || '[]');
+                    const filtered = currentPending.filter((p: any) => p.name !== file.name);
+                    if (filtered.length > 0) localStorage.setItem(PENDING_SYNC_KEY, JSON.stringify(filtered));
+                    else localStorage.removeItem(PENDING_SYNC_KEY);
+                  } catch { }
+                }
+              }
+            }
+
+            pendingFiles = pendingFiles.filter(f => !newlySynced.includes(f));
+            if (pendingFiles.length > 0 && attempt < maxAttempts) {
+              setTimeout(attemptSync, 5000);
+            } else {
+              if (refreshLibrary) await refreshLibrary();
+            }
+          } catch (err) {
+            if (attempt < maxAttempts) setTimeout(attemptSync, 5000);
+          }
+        };
+        setTimeout(attemptSync, 5000);
+      }
+
+      // 5. UI FINALIZE
+      if (refreshLibrary) await refreshLibrary();
       setPreparedFiles([]);
       setUploadStatus('success');
-      showToast("Upload Successful! Syncing library...", "success");
-
-      setTimeout(() => {
-        if (refreshLibrary) refreshLibrary();
-      }, 3000);
-
+      showToast("Upload Successful! Finalizing library...", "success");
       setTimeout(() => { setUploadStatus('idle'); }, 4000);
+
     } catch (e: any) {
       setUploadStatus('error');
       showToast(e?.message || "Shelby upload failed", "error");
@@ -1131,12 +1255,6 @@ function App() {
     loadTrack(track, true, allTracks);
   }, [loadTrack]);
 
-  const cloudCurrentIndex = useMemo(() => {
-    // Only show "Playing" icon in Cloud Explorer if the current playlist is from Shelby (Cloud)
-    const isCloudPlaylist = currentPlaylist.length > 0 &&
-      (currentPlaylist[0].source === 'SHELBY' || currentPlaylist[0].source === 'shelby');
-    return isCloudPlaylist ? currentIndex : -1;
-  }, [currentPlaylist, currentIndex]);
 
   return (
     <div className="app">
@@ -1254,9 +1372,9 @@ function App() {
                   }}>
                     <TrackList
                       tracks={paginatedTracks}
-                      currentIndex={currentPlaylist === tracks ? currentIndex : -1}
+                      playingTrackId={currentTrack?.id}
                       isPlaying={isPlaying}
-                      onTrackSelect={(i) => loadTrack(paginatedTracks[i], true)}
+                      onTrackSelect={(i) => loadTrack(paginatedTracks[i], true, filteredTracks)}
                       onToggleVisibility={handleToggleVisibility}
                       onDelete={handleDelete}
                       formatTime={formatTime}
@@ -1315,7 +1433,7 @@ function App() {
           {activeView === 'cloud-explorer' && (
             <CloudExplorer
               onTrackSelect={handleCloudTrackSelect}
-              currentIndex={cloudCurrentIndex}
+              playingTrackId={currentTrack?.id}
               isPlaying={isPlaying}
               formatTime={formatTime}
               formatSize={formatSize}

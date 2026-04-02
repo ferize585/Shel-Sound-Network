@@ -6,7 +6,7 @@ import { getPublicAudioBlobsPaginated } from '../utils/shelbyExplorer';
 
 interface CloudExplorerProps {
   onTrackSelect: (track: Track, allTracks?: Track[]) => void;
-  currentIndex: number;
+  playingTrackId?: string | number;
   isPlaying: boolean;
   formatTime: (sec: number | undefined) => string;
   formatSize: (bytes: number | undefined) => string;
@@ -14,7 +14,7 @@ interface CloudExplorerProps {
   sizes: Record<string | number, number>;
 }
 
-const CloudExplorer: React.FC<CloudExplorerProps> = ({ onTrackSelect, currentIndex, isPlaying, formatTime, formatSize, durations, sizes }) => {
+const CloudExplorer: React.FC<CloudExplorerProps> = ({ onTrackSelect, playingTrackId, isPlaying, formatTime, formatSize, durations, sizes }) => {
   const [cloudTracks, setCloudTracks] = useState<Track[]>([]);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -179,7 +179,7 @@ const CloudExplorer: React.FC<CloudExplorerProps> = ({ onTrackSelect, currentInd
             }}>
               <TrackList 
                 tracks={cloudTracks}
-                currentIndex={currentIndex}
+                playingTrackId={playingTrackId}
                 isPlaying={isPlaying}
                 onTrackSelect={handleTrackSelect}
                 formatTime={formatTime}
