@@ -3,7 +3,7 @@ import type { Track } from '../types';
 
 interface TrackListProps {
   tracks: Track[];
-  currentIndex: number;
+  playingTrackId?: string | number;
   isPlaying: boolean;
   onTrackSelect: (index: number) => void;
   onDelete?: (id: string | number) => void;
@@ -18,7 +18,7 @@ interface TrackListProps {
 
 const TrackList: React.FC<TrackListProps> = React.memo(({ 
   tracks, 
-  currentIndex, 
+  playingTrackId, 
   isPlaying, 
   onTrackSelect, 
   onDelete, 
@@ -74,17 +74,18 @@ const TrackList: React.FC<TrackListProps> = React.memo(({
         const duration = durations[track.id] || track.duration;
         const size = sizes[track.id] || track.size;
         const isPublic = track.is_public === true || track.is_public === 'true' as any;
+        const isCurrent = track.id === playingTrackId;
 
         return (
           <div key={track.id} className="track-row-container">
             <div
-              className={`track-item track-grid ${variant === 'library' ? 'lib-grid' : 'cloud-grid'} ${i === currentIndex ? 'playing' : ''}`}
+              className={`track-item track-grid ${variant === 'library' ? 'lib-grid' : 'cloud-grid'} ${isCurrent ? 'playing' : ''}`}
               style={{ animationDelay: `${i * 0.03}s`, cursor: 'pointer' }}
               onClick={() => onTrackSelect(i)}
             >
               {/* Index / EQ bars — always visible */}
               <div className="track-num">
-                {i === currentIndex && isPlaying ? (
+                {isCurrent && isPlaying ? (
                   <div className="track-play-icon">
                     <div className="tpi-bar"></div>
                     <div className="tpi-bar"></div>

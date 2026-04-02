@@ -30,7 +30,7 @@ function ShelbyProvider({ children }: { children: React.ReactNode }) {
 
   return (
     <AptosWalletAdapterProvider 
-      autoConnect={false}
+      autoConnect={true}
       dappConfig={{ network: Network.TESTNET }}
       onError={(error) => {
         if (import.meta.env.DEV) console.error('[Wallet Ecosystem] Rejection/Error caught:', error);
