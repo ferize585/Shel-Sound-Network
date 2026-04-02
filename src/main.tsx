@@ -1,43 +1,54 @@
-import './polyfills';
-import React from 'react'
-import ReactDOM from 'react-dom/client'
-import App from './App.tsx'
-import './index.css'
-import { AptosWalletAdapterProvider } from "@aptos-labs/wallet-adapter-react";
-import { PetraWallet } from "petra-plugin-wallet-adapter";
-import { Network } from "@aptos-labs/ts-sdk";
+import './polyfills'; // ABSOLUTELY MUST BE FIRST LINE
+import React, { useMemo } from 'react';
+import ReactDOM from 'react-dom/client';
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
+import { AptosWalletAdapterProvider } from '@aptos-labs/wallet-adapter-react';
+
+import App from './App';
+import './index.css';
+
 import { ShelbyClientProvider } from '@shelby-protocol/react';
 import { ShelbyClient } from '@shelby-protocol/sdk/browser';
+import { Network } from '@aptos-labs/ts-sdk';
 
 const queryClient = new QueryClient();
-const apiKey = import.meta.env.VITE_SHELBY_API_KEY_TESTNET;
 
-// Wrapper to satisfy the requirement of ShelbyProvider with apiKey prop
-const ShelbyProvider = ({ children, apiKey }: { children: React.ReactNode; apiKey?: string }) => {
-  // @ts-ignore - The Shelby SDK expects a specific string or enum that may conflict with the upgraded Aptos SDK types
-  const client = React.useMemo(() => new ShelbyClient({ network: "testnet", apiKey }), [apiKey]);
-  return <ShelbyClientProvider client={client}>{children}</ShelbyClientProvider>;
-};
+function ShelbyProvider({ children }: { children: React.ReactNode }) {
+  const shelbyClient = useMemo(() => {
+    // Reverted to stable Testnet-only configuration.
+    // Shelbynet prototype logic has been removed to ensure maximum stability.
+    return new ShelbyClient({ 
+      apiKey: import.meta.env.VITE_SHELBY_API_KEY_TESTNET,
+      // Reverted to custom Shelby indexer to resolve 'blobs' field validation errors.
+      // @ts-ignore - custom indexer endpoint
+      gqlEndpoint: 'https://api.testnet.aptoslabs.com/nocode/v1/public/cmlfqs5wt00qrs601zt5s4kfj/v1/graphql',
+      // @ts-ignore - aligning with official .xyz RPC route (root API alignment)
+      rpcUrl: 'https://api.testnet.shelby.xyz',
+      network: Network.TESTNET 
+    });
+  }, []);
+
+  return (
+    <AptosWalletAdapterProvider 
+      autoConnect={false}
+      dappConfig={{ network: Network.TESTNET }}
+      onError={(error) => {
+        if (import.meta.env.DEV) console.error('[Wallet Ecosystem] Rejection/Error caught:', error);
+      }}
+    >
+      <ShelbyClientProvider client={shelbyClient}>
+        {children}
+      </ShelbyClientProvider>
+    </AptosWalletAdapterProvider>
+  );
+}
 
 ReactDOM.createRoot(document.getElementById('root')!).render(
   <React.StrictMode>
     <QueryClientProvider client={queryClient}>
-      <AptosWalletAdapterProvider 
-        plugins={[new PetraWallet() as any]}
-        autoConnect={true}
-        dappConfig={{ 
-          network: Network.TESTNET,
-          aptosConnect: { 
-            dappName: "Shelby Sound Network",
-            dappId: "shelby-audio-player-v1"
-          }
-        }}
-      >
-        <ShelbyProvider apiKey={apiKey}>
-          <App />
-        </ShelbyProvider>
-      </AptosWalletAdapterProvider>
+      <ShelbyProvider>
+        <App />
+      </ShelbyProvider>
     </QueryClientProvider>
-  </React.StrictMode>,
-)
+  </React.StrictMode>
+);

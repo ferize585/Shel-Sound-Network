@@ -23,6 +23,7 @@ interface PlayerBarProps {
   audioRef: React.RefObject<HTMLAudioElement | null>;
   isArtFlashing: boolean;
   settings: import('../types').Settings;
+  isReconnecting?: boolean;
 }
 
 const PlayerBar: React.FC<PlayerBarProps> = ({
@@ -47,6 +48,7 @@ const PlayerBar: React.FC<PlayerBarProps> = ({
   audioRef,
   isArtFlashing,
   settings,
+  isReconnecting = false,
 }) => {
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const audioCtxRef = useRef<AudioContext | null>(null);
@@ -81,14 +83,15 @@ const PlayerBar: React.FC<PlayerBarProps> = ({
 
     let animationId: number;
 
+    // FIX 1: Use setTransform instead of scale() to prevent DPR accumulation on every resize
     const resizeCanvas = () => {
       const dpr = window.devicePixelRatio || 1;
       const width = canvas.offsetWidth;
       const height = canvas.offsetHeight;
-      
+      if (width === 0 || height === 0) return; // Skip if not yet laid out
       canvas.width = width * dpr;
       canvas.height = height * dpr;
-      ctx.scale(dpr, dpr);
+      ctx.setTransform(dpr, 0, 0, dpr, 0, 0); // Not cumulative — always sets absolute transform
     };
 
     const initVisualizer = () => {
@@ -104,13 +107,12 @@ const PlayerBar: React.FC<PlayerBarProps> = ({
           analyserRef.current = audioCtxRef.current.createAnalyser();
           gainNodeRef.current = audioCtxRef.current.createGain();
           
-          // Quality based on settings
-          analyserRef.current.fftSize = settings.highQuality ? 1024 : 256;
+          analyserRef.current.fftSize = settings.highQuality ? 1024 : 512;
+          analyserRef.current.smoothingTimeConstant = 0.4;
+          analyserRef.current.minDecibels = -90;
           
-          // Boost based on settings
           gainNodeRef.current.gain.value = settings.volumeBoost ? 1.5 : 1.0;
           
-          // Connect graph: Source -> Gain -> Analyser -> Destination
           sourceNodeRef.current.connect(gainNodeRef.current);
           gainNodeRef.current.connect(analyserRef.current);
           analyserRef.current.connect(audioCtxRef.current.destination);
@@ -124,38 +126,34 @@ const PlayerBar: React.FC<PlayerBarProps> = ({
       animationId = requestAnimationFrame(draw);
       
       const analyser = analyserRef.current;
+      // FIX 2: Always read the actual CSS pixel dimensions for consistent coordinates
       const W = canvas.offsetWidth;
       const H = canvas.offsetHeight;
       
+      if (W === 0 || H === 0) return; // Guard: not yet rendered
       ctx.clearRect(0, 0, W, H);
 
       if (!settings.visualizer) return;
-
-      if (!analyser || !isPlaying) {
-        ctx.strokeStyle = 'rgba(0,198,255,0.1)';
-        ctx.lineWidth = 1;
-        ctx.beginPath();
-        ctx.moveTo(0, H / 2);
-        ctx.lineTo(W, H / 2);
-        ctx.stroke();
-        return;
-      }
+      if (!analyser || !isPlaying) return;
 
       const dataArray = new Uint8Array(analyser.frequencyBinCount);
       analyser.getByteFrequencyData(dataArray);
       
-      const bufferLength = Math.floor(dataArray.length * 0.85);
-      const barW = W / bufferLength;
+      // FIX 3: Use consistent barW for both width and x-position.
+      // Previously: barW = slot * 1.1 but x = slot * i → last bar overflows right edge.
+      // Now: barW = slot width, x = slot * i → exact fit, no overflow, no gaps.
+      const bufferLength = Math.floor(dataArray.length * 0.68);
+      const slotW = W / bufferLength;
+      const barW = slotW + 0.5; // +0.5 sub-pixel trick to avoid hairline gaps between bars
 
       for (let i = 0; i < bufferLength; i++) {
         const v = dataArray[i] / 255;
         const barH = v * H * 0.95;
-        const x = i * barW;
+        const x = i * slotW;
         
         const alpha = 0.2 + v * 0.7;
         const blue = Math.floor(200 + v * 55);
         ctx.fillStyle = `rgba(0, ${blue}, 255, ${alpha})`;
-        
         ctx.fillRect(x, H - barH, barW, barH);
         
         ctx.fillStyle = `rgba(0, 198, 255, ${alpha * 0.6})`;
@@ -163,6 +161,15 @@ const PlayerBar: React.FC<PlayerBarProps> = ({
       }
     };
 
+    // The play button click is already a valid user gesture.
+    // Immediately init + resume so the visualizer starts ON THE FIRST PLAY — no extra tap needed.
+    if (isPlaying) {
+      initVisualizer();
+      audioCtxRef.current?.resume().catch(() => {/* ignore */});
+    }
+
+    // Fallback: also listen for any click in case the AudioContext was blocked
+    // (e.g. autoplay on page load without prior interaction)
     const handleFirstInteraction = () => {
       initVisualizer();
       if (audioCtxRef.current?.state === 'suspended') {
@@ -171,28 +178,33 @@ const PlayerBar: React.FC<PlayerBarProps> = ({
       document.removeEventListener('click', handleFirstInteraction);
     };
 
-    document.addEventListener('click', handleFirstInteraction);
-    
-    if (audioCtxRef.current) {
-      if (audioCtxRef.current.state === 'suspended' && isPlaying) {
-        audioCtxRef.current.resume();
-      }
+    if (!audioCtxRef.current) {
+      // Only register fallback listener if AudioContext hasn't been created yet
+      document.addEventListener('click', handleFirstInteraction);
     }
 
     if (gainNodeRef.current) {
       gainNodeRef.current.gain.value = settings.volumeBoost ? 1.5 : 1.0;
     }
     if (analyserRef.current) {
-      analyserRef.current.fftSize = settings.highQuality ? 1024 : 256;
+      analyserRef.current.fftSize = settings.highQuality ? 1024 : 512;
+      analyserRef.current.smoothingTimeConstant = 0.4;
     }
 
     resizeCanvas();
+
+    const resizeObserver = new ResizeObserver(() => {
+      resizeCanvas();
+    });
+    resizeObserver.observe(canvas.parentElement || canvas);
+
     window.addEventListener('resize', resizeCanvas);
     draw();
 
     return () => {
       cancelAnimationFrame(animationId);
       window.removeEventListener('resize', resizeCanvas);
+      resizeObserver.disconnect();
       document.removeEventListener('click', handleFirstInteraction);
     };
   }, [isPlaying, audioRef, settings]);
@@ -261,9 +273,27 @@ const PlayerBar: React.FC<PlayerBarProps> = ({
 
   return (
     <div className={`player-bar ${(isPlaying || isBuffering) && settings.visualizer ? 'with-viz' : ''} relative`}>
-      {(isPlaying || isBuffering) && settings.visualizer && (
+      {(isPlaying || isBuffering || isReconnecting) && settings.visualizer && (
         <div className="visualizer-container relative">
           <canvas ref={canvasRef} />
+          {isReconnecting && (
+            <div className="reconnecting-status" style={{
+              position: 'absolute',
+              top: '50%',
+              left: '50%',
+              transform: 'translate(-50%, -50%)',
+              color: 'var(--accent)',
+              fontFamily: '"Space Mono", monospace',
+              fontSize: '10px',
+              letterSpacing: '2px',
+              textShadow: '0 0 10px rgba(0,198,255,0.8)',
+              zIndex: 10,
+              pointerEvents: 'none',
+              whiteSpace: 'nowrap'
+            }}>
+              RECONNECTING TO DATA GATEWAY...
+            </div>
+          )}
         </div>
       )}
 
