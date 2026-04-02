@@ -35,16 +35,16 @@ function App() {
   const [toast, setToast] = useState<{ msg: string; type: 'success' | 'error' } | null>(null);
   const [isArtFlashing, setIsArtFlashing] = useState(false);
   const [isReconnecting, setIsReconnecting] = useState(false);
-  
+
   const [sidebarOpen, setSidebarOpen] = useState(false);
-  const [preparedFiles, setPreparedFiles] = useState<{name: string, data: Uint8Array, title: string, artist: string, sizeRaw?: number, duration?: number}[]>([]);
+  const [preparedFiles, setPreparedFiles] = useState<{ name: string, data: Uint8Array, title: string, artist: string, sizeRaw?: number, duration?: number }[]>([]);
   // Ref (not state) so interval callbacks always read the latest deleted IDs without restarting the timer
   const deletedIdsRef = useRef<string[]>([]);
 
   const { connected, account, network, signAndSubmitTransaction } = useWallet();
-  
+
   const shelbyClient = useShelbyClient();
-  
+
   // @ts-ignore - Library version may differ
   const { mutateAsync: upload } = useUploadBlobs({ account });
   // @ts-ignore
@@ -90,7 +90,7 @@ function App() {
 
   const handleLibraryPageChange = (newPage: number, totalPages: number) => {
     if (newPage < 1 || newPage > totalPages || newPage === libraryPage) return;
-    
+
     // Immediate state update for responsiveness
     setLibraryPage(newPage);
 
@@ -113,15 +113,17 @@ function App() {
     const ctx = gsap.context(() => {
       // Animate Overlay
       if (sidebarOpen) {
-        gsap.fromTo(overlayRef.current, 
-          { opacity: 0 }, 
+        gsap.fromTo(overlayRef.current,
+          { opacity: 0 },
           { opacity: 1, duration: 0.3, ease: "power2.out", display: "block" }
         );
       } else {
-        gsap.to(overlayRef.current, 
-          { opacity: 0, duration: 0.3, ease: "power2.in", onComplete: () => {
-            if (overlayRef.current) overlayRef.current.style.display = "none";
-          }}
+        gsap.to(overlayRef.current,
+          {
+            opacity: 0, duration: 0.3, ease: "power2.in", onComplete: () => {
+              if (overlayRef.current) overlayRef.current.style.display = "none";
+            }
+          }
         );
       }
     }, mainRef);
@@ -131,19 +133,19 @@ function App() {
   useLayoutEffect(() => {
     const ctx = gsap.context(() => {
       const mm = gsap.matchMedia();
-      
+
       // Desktop & Tablet View Entry
       mm.add("(min-width: 768px)", () => {
-        gsap.fromTo(".view", 
-          { opacity: 0, x: 20, filter: "blur(10px)" }, 
+        gsap.fromTo(".view",
+          { opacity: 0, x: 20, filter: "blur(10px)" },
           { opacity: 1, x: 0, filter: "blur(0px)", duration: 0.6, ease: "power2.out", clearProps: "all" }
         );
       });
 
       // Mobile/Smartphone View Entry
       mm.add("(max-width: 767px)", () => {
-        gsap.fromTo(".view", 
-          { opacity: 0, y: 30, filter: "blur(5px)" }, 
+        gsap.fromTo(".view",
+          { opacity: 0, y: 30, filter: "blur(5px)" },
           { opacity: 1, y: 0, filter: "blur(0px)", duration: 0.5, ease: "power3.out", clearProps: "all" }
         );
       });
@@ -161,7 +163,7 @@ function App() {
     visualizer: true,
     ambientGlow: true
   });
-  
+
   // Real-time Tracker for UI
   const [cacheUsageBytes, setCacheUsageBytes] = useState<number>(0);
 
@@ -258,14 +260,14 @@ function App() {
     const load = async () => {
       try {
         const myTracks = await getAudioBlobs(currentAddress, undefined, true);
-        cacheTrackMetadata(myTracks); 
-        
+        cacheTrackMetadata(myTracks);
+
         // [STRICT ISOLATION] Secondary filter to ensure no cross-account leakage
-        const filtered = myTracks.filter(t => 
+        const filtered = myTracks.filter(t =>
           normalizeAddress(t.owner || '') === currentAddress &&
           !deletedIdsRef.current.includes(String(t.id))
         );
-        
+
         setTracks(filtered);
       } catch { /* getAudioBlobs already handles errors internally */ }
     };
@@ -293,7 +295,7 @@ function App() {
         const incoming = await getAudioBlobs(currentAddress, syncAbort.signal, true);
         if (!cancelled) {
           // [STRICT ISOLATION] Ensure polling data strictly belongs to active user
-          const merged = incoming.filter(t => 
+          const merged = incoming.filter(t =>
             normalizeAddress(t.owner || '') === currentAddress &&
             !deletedIdsRef.current.includes(String(t.id))
           );
@@ -333,7 +335,7 @@ function App() {
       const rawAddress = account.address.toString();
       const fresh = await getAudioBlobs(rawAddress, undefined, true);
       cacheTrackMetadata(fresh);
-      const newTracks = fresh.filter(t => 
+      const newTracks = fresh.filter(t =>
         !deletedIdsRef.current.includes(String(t.id))
       );
       setTracks(newTracks);
@@ -381,9 +383,9 @@ function App() {
 
     try {
       if (!signAndSubmitTransaction) throw new Error('Wallet not connected');
-      
+
       const suffixName = track.blobName.substring(track.blobName.indexOf('/') + 1);
-      
+
       // 1. DELETE FROM SHELBY (Blockchain)
       try {
         // @ts-ignore
@@ -425,7 +427,7 @@ function App() {
   const loadBlobFallback = async (track: Track) => {
     const audio = audioRef.current;
     if (!audio) return;
-    
+
     try {
       // [Official Alignment]: Murni menggunakan SDK sesuai dokumentasi
       // Discovery di loadTrack menjamin data ini ada untuk Cloud Explorer.
@@ -453,15 +455,15 @@ function App() {
             }
           } catch (sdkErr: any) {
             if (import.meta.env.DEV) console.error("[SDK] Call failed:", sdkErr.message);
-            
+
             // [Memory Cache Protector]: Jika memutar dari Cache Lokal, blok ini akan bypass.
             // Namun jika tidak, artinya file ini gagal dimuat karena namanya terpotong/mismatch
             // di storage node (umumnya akibat karakter spesial saat upload).
             if (audio.src && audio.src.startsWith('blob:')) {
-               if (import.meta.env.DEV) console.warn("[Fallback] Bypassed error 404: Audio securely playing via Memory Cache.");
-               return; 
+              if (import.meta.env.DEV) console.warn("[Fallback] Bypassed error 404: Audio securely playing via Memory Cache.");
+              return;
             }
-            
+
             showToast('Lagu gagal dimuat. Kemungkinan file di jaringan terkorupsi (404). Silakan Re-upload lagu ini.', 'error');
             setIsReconnecting(false);
           }
@@ -484,13 +486,13 @@ function App() {
   const syncTrackMetadata = async (track: Track, detectedDuration: number, detectedSize?: number) => {
     // Only sync if we have a valid commitment and the track is missing info
     if (!track.blob_commitment) return;
-    
+
     const needsDuration = !track.duration && detectedDuration > 0;
     const needsSize = !track.size && detectedSize && detectedSize > 0;
 
     if (needsDuration || needsSize) {
       if (import.meta.env.DEV) console.log(`[Sync] Auto-detecting metadata for track: "${track.title}"`);
-      
+
       const updatedMetadata: any = {
         title: track.title,
         artist: track.artist,
@@ -517,13 +519,13 @@ function App() {
 
     let list = forcedPlaylist || (activeView === 'cloud-explorer' ? currentPlaylist : tracks);
     let index = list.findIndex(t => String(t.id).toLowerCase() === String(track.id).toLowerCase());
-    
+
     // If it's still -1 but forcedPlaylist exists, definitely use forcedPlaylist
     if (index < 0 && forcedPlaylist) {
       index = forcedPlaylist.findIndex(t => String(t.id).toLowerCase() === String(track.id).toLowerCase());
       list = forcedPlaylist;
     }
-    
+
     if (index < 0) {
       if (import.meta.env.DEV) console.warn(`[LoadTrack] Track not found in current context playlist.`, { trackId: track.id, listLength: list.length });
       return;
@@ -556,7 +558,7 @@ function App() {
     // The native 'pause' event executed above will trigger the handlePause 
     // listener and sync the state naturally, eliminating UI mismatches.
     setIsBuffering(true);
-    
+
     // ─── Cache check ───────────────────────────────────────────────────────────
     // Use cached objectURL if available (avoids re-downloading from Shelby).
     const cached = audioCache.current.get(track.id);
@@ -565,11 +567,11 @@ function App() {
       // Update lastAccessed so LRU eviction keeps frequently-used tracks longer
       cached.lastAccessed = Date.now();
     } else if ((track.source === 'SHELBY' || track.source === 'shelby') &&
-               (track.url.startsWith('blob:') || track.url.includes('gateway'))) {
+      (track.url.startsWith('blob:') || track.url.includes('gateway'))) {
       // Gateway URL — safe to cache as-is (persistent link, size unknown)
       cacheSet(track.id, track.url, 0);
     }
-    
+
     setCurrentIndex(index);
     setCurrentPlaylist(list);
     setIsArtFlashing(true);
@@ -587,28 +589,28 @@ function App() {
       // [SOUND-RECOVERY]: Early source assignment ensures play() doesn't fail on empty src.
       // This is safe even if loadBlobFallback overwrites it later.
       if (track.url) audioRef.current.src = track.url;
-      
+
       if (track.source === 'SHELBY' || track.source === 'shelby') {
         // [NORMAL PATH] ALWAYS prioritize Shelby SDK for Testnet playback.
-        
+
         // [Unified Harmony Speed Fix]: Only run blocking Discovery if we are missing
         // the identity (blobName). For Library tracks, identity is usually present.
         if (!track.blobName && track.blob_commitment) {
           if (import.meta.env.DEV) console.log(`[Discovery] Missing identity for "${track.title}". Discovery active...`);
-          
+
           try {
             // [Collision Fix]: Pass track.owner explicitly! Jika kita tidak mengarahkan ownernya,
             // dan Indexer menyimpan 2 versi Hex ID yang berwujud sama (milik Keyless_Lama dan Petra_Baru),
             // Indexer akan selalu mengembalikan versi Keyless_Lama yang cacat dan berujung 404!
             const identity = await findBlobIdentity(track.blob_commitment, track.owner);
-            
+
             if (identity) {
               track.blobName = identity.blobName;
               // Tetap sinkron namun kali ini dijamin tidak akan tersesat dari track.owner aslinya!
               track.owner = identity.owner;
-              
+
               if (import.meta.env.DEV) console.log(`[Discovery] Identity resolved: ${track.blobName} for owner: ${track.owner}. Syncing...`);
-              syncTrackMetadata(track, 0, 0); 
+              syncTrackMetadata(track, 0, 0);
             }
           } catch (discErr) {
             if (import.meta.env.DEV) console.error(`[Discovery] Failed to find identity:`, discErr);
@@ -616,7 +618,7 @@ function App() {
         }
 
         await loadBlobFallback(track);
-        if (isStale()) { setIsBuffering(false); return; } 
+        if (isStale()) { setIsBuffering(false); return; }
       } else {
         // Non-SHELBY source (local files, etc.) — unchanged
         audioRef.current.src = track.url;
@@ -674,14 +676,14 @@ function App() {
       loadTrack(list[0], true);
       return;
     }
-    
+
     // Rely exclusively on the native audio element's state, preventing 
     // desyncs between UI (isPlaying) and the actual media engine.
     if (audioRef.current && audioRef.current.src) {
       if (!audioRef.current.paused) {
         audioRef.current.pause();
       } else {
-        audioRef.current.play().catch(() => {});
+        audioRef.current.play().catch(() => { });
       }
     }
   };
@@ -729,13 +731,13 @@ function App() {
 
     try {
       setUploadStatus('uploading');
-      
+
       const newFiles = await Promise.all(
         files.map(async (file) => {
           const buffer = await file.arrayBuffer();
           // Extract ID3 tags for dynamic metadata on-chain
           const { artist, title } = parseID3Metadata(buffer);
-          
+
           let formattedName = file.name;
           if (artist && title) {
             formattedName = `${artist} - ${title}.mp3`;
@@ -744,11 +746,11 @@ function App() {
           } else {
             // Keep original filename if no reliable ID3 tags exist
           }
-          
+
           // PHASE 2: Save structured metadata explicitly to local cache immediately
           try {
             const existing = JSON.parse(localStorage.getItem('track_metadata') || '{}');
-            existing[formattedName] = { 
+            existing[formattedName] = {
               title: title || formattedName.replace(/\.[^.]+$/, '').trim(),
               artist: artist || 'Unknown Artist'
             };
@@ -761,7 +763,7 @@ function App() {
             const tempAudio = new Audio();
             const objectUrl = URL.createObjectURL(file);
             tempAudio.src = objectUrl;
-            
+
             duration = await new Promise<number>((resolve) => {
               tempAudio.onloadedmetadata = () => {
                 const d = tempAudio.duration;
@@ -792,7 +794,7 @@ function App() {
           };
         })
       );
-      
+
       setPreparedFiles(newFiles);
       setUploadStatus('idle');
       showToast(`${files.length} file(s) prepared for sync`, "success");
@@ -807,13 +809,13 @@ function App() {
 
     try {
       setUploadStatus('uploading');
-      
+
       if (!account || !signAndSubmitTransaction) {
         throw new Error("Wallet not fully connected or signer unavailable");
       }
 
-      const addressString = typeof account.address === 'string' 
-        ? account.address 
+      const addressString = typeof account.address === 'string'
+        ? account.address
         : (account.address as any).toString();
 
       if (!addressString) {
@@ -832,12 +834,12 @@ function App() {
         if (import.meta.env.DEV) console.log(`[Upload] Triggering SDK upload on Testnet...`);
         await upload({
           blobs: blobDataList,
-          expirationMicros: (Date.now() + 1000 * 60 * 60 * 24 * 30) * 1000, 
+          expirationMicros: (Date.now() + 1000 * 60 * 60 * 24 * 30) * 1000,
           // @ts-ignore
-          signer: { 
-            account, 
+          signer: {
+            account,
             accountAddress: addressString,
-            signAndSubmitTransaction 
+            signAndSubmitTransaction
           }
         } as any);
       } catch (err: any) {
@@ -919,11 +921,11 @@ function App() {
       setPreparedFiles([]);
       setUploadStatus('success');
       showToast("Upload Successful! Syncing library...", "success");
-      
-      setTimeout(() => { 
-        if (refreshLibrary) refreshLibrary(); 
+
+      setTimeout(() => {
+        if (refreshLibrary) refreshLibrary();
       }, 3000);
-      
+
       setTimeout(() => { setUploadStatus('idle'); }, 4000);
     } catch (e: any) {
       setUploadStatus('error');
@@ -982,7 +984,7 @@ function App() {
     const handleEnded = () => {
       if (isLoop) {
         audio.currentTime = 0;
-        audio.play().catch(() => {});
+        audio.play().catch(() => { });
       } else {
         nextTrack();
       }
@@ -1069,10 +1071,10 @@ function App() {
         gsap.to(".sidebar-overlay", { opacity: 1, duration: 0.3 });
       } else {
         // Hide overlay and slide sidebar out
-        gsap.to(".sidebar-overlay", { 
-          opacity: 0, 
-          duration: 0.3, 
-          onComplete: () => { gsap.set(".sidebar-overlay", { display: 'none' }); } 
+        gsap.to(".sidebar-overlay", {
+          opacity: 0,
+          duration: 0.3,
+          onComplete: () => { gsap.set(".sidebar-overlay", { display: 'none' }); }
         });
       }
       return () => {
@@ -1088,11 +1090,11 @@ function App() {
 
       // 2. Nested Scaling Profiles
       const mqNarrow = gsap.matchMedia();
-      
+
       // NARROW DESKTOP (Desktop Site HP / Small Laptops)
       mqNarrow.add("(max-width: 1365px)", () => {
         gsap.to(":root", {
-          "--track-grid-lib":   "38px minmax(0, 1fr) 75px 60px 145px",
+          "--track-grid-lib": "38px minmax(0, 1fr) 75px 60px 145px",
           "--track-grid-cloud": "38px minmax(0, 1fr) 90px 75px",
           "--track-actions-scale": 0.85,
           duration: 0.4,
@@ -1103,7 +1105,7 @@ function App() {
       // WIDE DESKTOP (Full Monitor)
       mqNarrow.add("(min-width: 1366px)", () => {
         gsap.to(":root", {
-          "--track-grid-lib":   "48px minmax(0, 6fr) 120px 100px 160px",
+          "--track-grid-lib": "48px minmax(0, 6fr) 120px 100px 160px",
           "--track-grid-cloud": "48px minmax(0, 6fr) 140px 120px",
           "--track-actions-scale": 1,
           duration: 0.4,
@@ -1131,8 +1133,8 @@ function App() {
 
   const cloudCurrentIndex = useMemo(() => {
     // Only show "Playing" icon in Cloud Explorer if the current playlist is from Shelby (Cloud)
-    const isCloudPlaylist = currentPlaylist.length > 0 && 
-                           (currentPlaylist[0].source === 'SHELBY' || currentPlaylist[0].source === 'shelby');
+    const isCloudPlaylist = currentPlaylist.length > 0 &&
+      (currentPlaylist[0].source === 'SHELBY' || currentPlaylist[0].source === 'shelby');
     return isCloudPlaylist ? currentIndex : -1;
   }, [currentPlaylist, currentIndex]);
 
@@ -1141,23 +1143,23 @@ function App() {
       <header className="mobile-header">
         <button className="menu-toggle" onClick={() => setSidebarOpen(true)}>
           <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
-            <path d="M3 12h18M3 6h18M3 18h18"/>
+            <path d="M3 12h18M3 6h18M3 18h18" />
           </svg>
         </button>
         <div style={{ width: '40px' }}></div>
       </header>
 
-      <div 
-        className="sidebar-overlay" 
-        ref={overlayRef} 
-        style={{ display: 'none' }} 
+      <div
+        className="sidebar-overlay"
+        ref={overlayRef}
+        style={{ display: 'none' }}
         onClick={dismissSidebar}
       ></div>
 
       <div className="content-area">
-        <Sidebar 
-          activeView={activeView} 
-          onViewChange={setActiveView} 
+        <Sidebar
+          activeView={activeView}
+          onViewChange={setActiveView}
           nowPlayingTrack={currentTrack}
           isPlaying={isPlaying}
           isOpen={sidebarOpen}
@@ -1178,9 +1180,9 @@ function App() {
             return (
               <div className="view" style={{ paddingBottom: typeof window !== 'undefined' && window.innerWidth < 768 ? '250px' : '20px' }}>
                 <div className="view-header">
-                  <div className="view-header-container" style={{ 
-                    display: 'flex', 
-                    alignItems: 'center', 
+                  <div className="view-header-container" style={{
+                    display: 'flex',
+                    alignItems: 'center',
                     justifyContent: 'space-between',
                     width: '100%',
                     flexWrap: 'wrap'
@@ -1216,8 +1218,8 @@ function App() {
                       }}
                     >
                       <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round">
-                        <path d="M1 4v6h6"/><path d="M23 20v-6h-6"/>
-                        <path d="M20.49 9A9 9 0 0 0 5.64 5.64L1 10m22 4l-4.64 4.36A9 9 0 0 1 3.51 15"/>
+                        <path d="M1 4v6h6" /><path d="M23 20v-6h-6" />
+                        <path d="M20.49 9A9 9 0 0 0 5.64 5.64L1 10m22 4l-4.64 4.36A9 9 0 0 1 3.51 15" />
                       </svg>
                       REFRESH
                     </button>
@@ -1246,14 +1248,14 @@ function App() {
                     <div className="track-duration hidden sm:flex">DURATION</div>
                     <div className="track-actions hidden sm:flex">ACTIONS</div>
                   </div>
-                  <div className="mobile-track-container" style={{ 
-                    height: typeof window !== 'undefined' && window.innerWidth < 768 ? '285px' : 'auto', 
+                  <div className="mobile-track-container" style={{
+                    height: typeof window !== 'undefined' && window.innerWidth < 768 ? '285px' : 'auto',
                     overflowY: typeof window !== 'undefined' && window.innerWidth < 768 ? 'scroll' : 'visible'
                   }}>
-                    <TrackList 
-                      tracks={paginatedTracks} 
+                    <TrackList
+                      tracks={paginatedTracks}
                       currentIndex={currentPlaylist === tracks ? currentIndex : -1}
-                      isPlaying={isPlaying} 
+                      isPlaying={isPlaying}
                       onTrackSelect={(i) => loadTrack(paginatedTracks[i], true)}
                       onToggleVisibility={handleToggleVisibility}
                       onDelete={handleDelete}
@@ -1268,7 +1270,7 @@ function App() {
                 </div>
 
                 {totalLibraryPages > 1 && (
-                  <div ref={libraryPaginationRef} className="pagination-container" style={{ 
+                  <div ref={libraryPaginationRef} className="pagination-container" style={{
                     marginBottom: typeof window !== 'undefined' && window.innerWidth < 768 ? '120px' : '10px'
                   }}>
                     <div className="pagination-controls">
@@ -1280,7 +1282,7 @@ function App() {
                       >
                         ←
                       </button>
-                      
+
                       {Array.from({ length: totalLibraryPages }, (_, i) => i + 1).map(p => (
                         <button
                           key={p}
@@ -1300,7 +1302,7 @@ function App() {
                         →
                       </button>
                     </div>
-                    
+
                     <div className="pagination-info">
                       LIBRARY PAGE {libraryPage} OF {totalLibraryPages}
                     </div>
@@ -1311,7 +1313,7 @@ function App() {
           })()}
 
           {activeView === 'cloud-explorer' && (
-            <CloudExplorer 
+            <CloudExplorer
               onTrackSelect={handleCloudTrackSelect}
               currentIndex={cloudCurrentIndex}
               isPlaying={isPlaying}
@@ -1329,7 +1331,7 @@ function App() {
                 <div className="view-subtitle">ADD TRACKS TO TESTNET LIBRARY</div>
               </div>
               <UploadZone onFilesSelected={handleFilesSelected} />
-              
+
               {preparedFiles.length > 0 && (
                 <div className="prepared-files-container" style={{ margin: '16px 0', padding: '16px', backgroundColor: 'rgba(0,0,0,0.2)', borderRadius: '8px', border: '1px solid rgba(255,255,255,0.1)' }}>
                   <div style={{ fontSize: '11px', color: 'rgba(255,255,255,0.5)', marginBottom: '12px', fontFamily: '"Space Mono", monospace', textTransform: 'uppercase', letterSpacing: '1px' }}>
@@ -1342,7 +1344,7 @@ function App() {
                       </div>
                     ))}
                   </div>
-                  <button 
+                  <button
                     onClick={performUpload}
                     className="sync-button"
                     disabled={uploadStatus === 'uploading'}
@@ -1368,12 +1370,12 @@ function App() {
                       'Syncing...'
                     ) : (
                       <>
-                        <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="17 8 12 3 7 8"/><line x1="12" y1="3" x2="12" y2="15"/></svg>
+                        <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4" /><polyline points="17 8 12 3 7 8" /><line x1="12" y1="3" x2="12" y2="15" /></svg>
                         SYNC TO TESTNET
                       </>
                     )}
                   </button>
-                  <button 
+                  <button
                     onClick={() => setPreparedFiles([])}
                     style={{
                       width: '100%',
@@ -1391,7 +1393,7 @@ function App() {
                   </button>
                 </div>
               )}
-              
+
               {uploadStatus === 'uploading' && !preparedFiles.length && (
                 <div style={{ textAlign: 'center', color: 'var(--accent)', margin: '16px var(--gutter)', fontSize: '13px', fontFamily: '"Space Mono", monospace' }}>
                   Uploading to Testnet Network...
@@ -1515,7 +1517,7 @@ function App() {
                       <div className="settings-value full-address">
                         {account?.address?.toString() || 'Not Connected'}
                       </div>
-                      <button 
+                      <button
                         className={`copy-btn ${copied ? 'copied' : ''}`}
                         onClick={handleCopyAddress}
                         disabled={!account?.address}
@@ -1532,7 +1534,7 @@ function App() {
         </main>
       </div>
 
-      <PlayerBar 
+      <PlayerBar
         currentTrack={currentTrack}
         isPlaying={isPlaying}
         isBuffering={isBuffering}
